@@ -11,8 +11,6 @@ class ProgressRepository(private val dao: ProgressDao) {
             description = "",
             image = entity.image,
             streamUrl = entity.streamUrl,
-            episode = entity.title,
-            watchType = entity.title
         )
 
     // Items you haven't fully finished (rough heuristic)

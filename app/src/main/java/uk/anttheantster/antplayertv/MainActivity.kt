@@ -21,12 +21,14 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextField
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -440,15 +442,15 @@ fun AntPlayerPlayer(
     // Log analytics once per stream URL
     LaunchedEffect(mediaItem.streamUrl) {
         val titleForAnalytics = mediaItem.title           // adjust if needed
-        val episodeLabel = mediaItem.episode         // e.g. "Episode 3" / "Movie"
-        val watchTypeLabel = mediaItem.watchType     // e.g. "sub" / "dub" / "raw"
+        val episodeLabel = mediaItem.title        // e.g. "Episode 3" / "Movie"
+        val watchTypeLabel = mediaItem.type     // e.g. "sub" / "dub" / "raw"
 
         analyticsApi.logPlay(
             licenseKey = licenseKey,
             deviceId = deviceId,
             title = titleForAnalytics,
             episodeLabel = episodeLabel,
-            watchType = watchTypeLabel
+            watchType = watchTypeLabel.toString()
         )
     }
 
@@ -859,8 +861,6 @@ fun AntPlayerDetails(
                                                         description = details?.description ?: "",
                                                         image = item.image,
                                                         streamUrl = option.url,
-                                                        episode = "$ep",
-                                                        watchType = option.label
                                                     )
                                                     showStreamDialog = false
                                                     onPlay(playableItem)
@@ -935,23 +935,27 @@ fun AntPlayerSearch(
     onItemSelected: (MediaItem) -> Unit,
     onBack: () -> Unit
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
     val api = remember {
         RemoteSearchApi(
-            baseUrl = "https://api.anttheantster.uk"
+            baseUrl = "http://178.79.150.26:3000"
         )
     }
 
     var query by remember { mutableStateOf("") }
+
+    // Results from the server
     var searchResults by remember { mutableStateOf<List<AshiSearchResult>>(emptyList()) }
+
+    // Simple loading indicator flag
     var isLoading by remember { mutableStateOf(false) }
 
-    val searchFocusRequester = remember { FocusRequester() }
+    // 🔹 Focus requester for the first result row
+    val firstResultFocusRequester = remember { FocusRequester() }
 
-    // Auto-focus search field when screen opens
-    LaunchedEffect(Unit) {
-        searchFocusRequester.requestFocus()
-    }
-
+    // When the query changes, call the server
     LaunchedEffect(query) {
         if (query.isBlank()) {
             searchResults = emptyList()
@@ -962,7 +966,16 @@ fun AntPlayerSearch(
         }
     }
 
-    BackHandler { onBack() }
+    // 🔹 When results appear, move focus to the first row
+    LaunchedEffect(searchResults) {
+        if (searchResults.isNotEmpty()) {
+            firstResultFocusRequester.requestFocus()
+        }
+    }
+
+    BackHandler {
+        onBack()
+    }
 
     MaterialTheme {
         Column(
@@ -987,7 +1000,6 @@ fun AntPlayerSearch(
                     singleLine = true,
                     modifier = Modifier
                         .weight(1f)
-                        .focusRequester(searchFocusRequester)
                 )
             }
 
@@ -999,7 +1011,7 @@ fun AntPlayerSearch(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text("Searching...", color = MaterialTheme.colorScheme.onBackground)
+                        Text("Searching.", color = MaterialTheme.colorScheme.onBackground)
                     }
                 }
 
@@ -1022,23 +1034,24 @@ fun AntPlayerSearch(
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                         modifier = Modifier.fillMaxSize()
                     ) {
-                        items(searchResults) { result ->
+                        itemsIndexed(searchResults) { index, result ->
                             // Convert AshiSearchResult to MediaItem for UI & navigation
                             val item = MediaItem(
-                                id = result.href,         // URL we pass to /details & /episodes
+                                id = result.href,         // URL for details/episodes
                                 title = result.title,
                                 description = "",         // filled by details API later
                                 image = result.image,
-                                streamUrl = "",             // no direct stream yet; details will resolve
-                                episode = "",
-                                watchType = ""
+                                streamUrl = ""            // no direct stream yet; details will resolve
                             )
+
+                            val rowModifier =
+                                if (index == 0) Modifier.focusRequester(firstResultFocusRequester)
+                                else Modifier
 
                             SearchResultRow(
                                 item = item,
-                                onClick = {
-                                    onItemSelected(item)
-                                }
+                                onClick = { onItemSelected(item) },
+                                modifier = rowModifier
                             )
                         }
                     }
@@ -1051,7 +1064,8 @@ fun AntPlayerSearch(
 @Composable
 fun SearchResultRow(
     item: MediaItem,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     var isFocused by remember { mutableStateOf(false) }
 
@@ -1061,7 +1075,7 @@ fun SearchResultRow(
     )
 
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .graphicsLayer {
                 scaleX = scale
@@ -1072,8 +1086,10 @@ fun SearchResultRow(
                 color = if (isFocused) MaterialTheme.colorScheme.primary else Color.Transparent,
                 shape = RoundedCornerShape(8.dp)
             )
-            .onFocusChanged { state -> isFocused = state.isFocused }
-            .clickable { onClick() }
+            .onFocusChanged { state ->
+                isFocused = state.isFocused
+            }
+            .clickable(onClick = onClick)
             .focusable()
             .padding(8.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -1096,6 +1112,32 @@ fun SearchResultRow(
                 color = MaterialTheme.colorScheme.onSurface
             )
             Spacer(modifier = Modifier.height(4.dp))
+
+            // metadata line: year • episodes • type
+            val metaParts = mutableListOf<String>()
+
+            item.releaseYear
+                ?.takeIf { it.isNotBlank() }
+                ?.let { metaParts.add(it) }
+
+            item.totalEpisodes?.let { count ->
+                val label = if (count == 1) "1 episode" else "$count episodes"
+                metaParts.add(label)
+            }
+
+            item.type
+                ?.takeIf { it.isNotBlank() }
+                ?.let { metaParts.add(it) }
+
+            if (metaParts.isNotEmpty()) {
+                Text(
+                    text = metaParts.joinToString(" • "),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+            }
+
             Text(
                 text = item.description,
                 style = MaterialTheme.typography.bodySmall,
