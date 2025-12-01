@@ -36,6 +36,11 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
@@ -48,6 +53,7 @@ import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import kotlinx.coroutines.launch
 import uk.anttheantster.antplayertv.BuildConfig
+import uk.anttheantster.antplayertv.data.AnalyticsApi
 import uk.anttheantster.antplayertv.data.AntPlayerDatabase
 import uk.anttheantster.antplayertv.data.AshiEpisode
 import uk.anttheantster.antplayertv.data.AshiDetails
@@ -218,6 +224,14 @@ fun AntPlayerHome(
                                 color = MaterialTheme.colorScheme.onBackground
                             )
                         }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text(
+                                text = "(v" + BuildConfig.VERSION_NAME + ")",
+                                style = MaterialTheme.typography.headlineSmall,
+                                color = MaterialTheme.colorScheme.onBackground
+                            )
+                        }
                     }
 
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -288,7 +302,7 @@ fun AntPlayerHome(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            "No items loaded",
+                            "Search for and watch a title for this screen to update",
                             color = MaterialTheme.colorScheme.onBackground
                         )
                     }
@@ -386,28 +400,25 @@ fun AntPlayerPlayer(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    // If stream URL is missing, don't even try to start ExoPlayer
+    // Analytics
+    val analyticsApi = remember { AnalyticsApi() }
+    val deviceId = remember { LicenseUtils.getOrCreateDeviceId(context) }
+    val licenseKey = remember { LicenseUtils.getStoredLicenseKey(context) }
+
+    // If URL is missing, show error
     if (mediaItem.streamUrl.isBlank()) {
         BackHandler { onBack() }
 
-        MaterialTheme {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        text = "Unable to play this stream.",
-                        color = Color.White
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "(empty URL)",
-                        color = Color.Gray
-                    )
-                }
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(text = "Unable to play this stream.", color = Color.White)
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(text = "(empty URL)", color = Color.Gray)
             }
         }
         return
@@ -416,7 +427,7 @@ fun AntPlayerPlayer(
     val db = remember { AntPlayerDatabase.getInstance(context) }
     val repository = remember { ProgressRepository(db.progressDao()) }
 
-    // Create the player once for this URL
+    // ExoPlayer instance
     val exoPlayer = remember(mediaItem.streamUrl) {
         ExoPlayer.Builder(context).build().apply {
             val media = ExoMediaItem.fromUri(mediaItem.streamUrl)
@@ -426,14 +437,29 @@ fun AntPlayerPlayer(
         }
     }
 
-    // Seek to resume position if provided
+    // Log analytics once per stream URL
+    LaunchedEffect(mediaItem.streamUrl) {
+        val titleForAnalytics = mediaItem.title           // adjust if needed
+        val episodeLabel = mediaItem.episode         // e.g. "Episode 3" / "Movie"
+        val watchTypeLabel = mediaItem.watchType     // e.g. "sub" / "dub" / "raw"
+
+        analyticsApi.logPlay(
+            licenseKey = licenseKey,
+            deviceId = deviceId,
+            title = titleForAnalytics,
+            episodeLabel = episodeLabel,
+            watchType = watchTypeLabel
+        )
+    }
+
+    // Resume position
     LaunchedEffect(startPositionMs) {
         if (startPositionMs != null && startPositionMs > 0L) {
             exoPlayer.seekTo(startPositionMs)
         }
     }
 
-    // Handle Back: save progress then go back to Details
+    // Save progress on back
     BackHandler {
         val position = exoPlayer.currentPosition
         val duration = exoPlayer.duration.coerceAtLeast(0L)
@@ -445,17 +471,49 @@ fun AntPlayerPlayer(
         onBack()
     }
 
-    // Release player when leaving this screen
+    // Release player when leaving
     DisposableEffect(Unit) {
         onDispose { exoPlayer.release() }
     }
 
-    // We store a reference to the PlayerView so we can call showController/requestFocus ONCE
+    // PlayerView reference
     var playerViewRef by remember { mutableStateOf<PlayerView?>(null) }
 
-    MaterialTheme {
+    // Focus will live on the AndroidView (PlayerView), not the Box
+    val focusRequester = remember { FocusRequester() }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black) // proper black bars
+    ) {
         AndroidView(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .focusRequester(focusRequester)
+                .focusable()
+                .onPreviewKeyEvent { event ->
+                    if (event.type == KeyEventType.KeyDown) {
+                        when (event.key) {
+                            Key.DirectionUp,
+                            Key.DirectionDown,
+                            Key.DirectionLeft,
+                            Key.DirectionRight,
+                            Key.DirectionCenter,
+                            Key.Enter,
+                            Key.NumPadEnter,
+                            Key.Spacebar -> {
+                                // Show controller whenever the user presses DPAD / OK
+                                playerViewRef?.showController()
+                                // return false so PlayerView still handles the key
+                                false
+                            }
+                            else -> false
+                        }
+                    } else {
+                        false
+                    }
+                },
             factory = { ctx ->
                 val themedContext = ContextThemeWrapper(
                     ctx,
@@ -465,36 +523,31 @@ fun AntPlayerPlayer(
                 PlayerView(themedContext).apply {
                     player = exoPlayer
                     useController = true
-                    controllerShowTimeoutMs = 5000 // never auto-hide
+                    controllerShowTimeoutMs = 5000 // auto-hide after 5s
+
+                    isFocusable = true
+                    isFocusableInTouchMode = true
 
                     layoutParams = ViewGroup.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.MATCH_PARENT
                     )
-
-                    // IMPORTANT: don't call showController()/requestFocus() here
-                    // we'll do it once in LaunchedEffect below
                 }.also { createdView ->
                     playerViewRef = createdView
                 }
             },
             update = { view ->
-                // Keep our ref up to date if AndroidView reuses/recreates the view
                 playerViewRef = view
             }
         )
 
-        // Run ONCE when we actually have a PlayerView instance
-        LaunchedEffect(playerViewRef) {
-            playerViewRef?.apply {
-                showController()
-                requestFocus()
-            }
+        // Grab focus when the player screen opens and show controller initially
+        LaunchedEffect(Unit) {
+            focusRequester.requestFocus()
+            playerViewRef?.showController()
         }
     }
 }
-
-
 
 @Composable
 fun AntPlayerDetails(
@@ -581,7 +634,7 @@ fun AntPlayerDetails(
             // ───── Remote Ashi series: details + episodes, per-episode expand + play ─────
             val api = remember {
                 RemoteSearchApi(
-                    baseUrl = "http://178.79.150.26:3000" // your Node server
+                    baseUrl = "https://api.anttheantster.uk" // your Node server
                 )
             }
 
@@ -805,7 +858,9 @@ fun AntPlayerDetails(
                                                         title = "${item.title} - Ep ${ep.number} (${option.label})",
                                                         description = details?.description ?: "",
                                                         image = item.image,
-                                                        streamUrl = option.url
+                                                        streamUrl = option.url,
+                                                        episode = "$ep",
+                                                        watchType = option.label
                                                     )
                                                     showStreamDialog = false
                                                     onPlay(playableItem)
@@ -882,7 +937,7 @@ fun AntPlayerSearch(
 ) {
     val api = remember {
         RemoteSearchApi(
-            baseUrl = "http://178.79.150.26:3000"
+            baseUrl = "https://api.anttheantster.uk"
         )
     }
 
@@ -974,7 +1029,9 @@ fun AntPlayerSearch(
                                 title = result.title,
                                 description = "",         // filled by details API later
                                 image = result.image,
-                                streamUrl = ""            // no direct stream yet; details will resolve
+                                streamUrl = "",             // no direct stream yet; details will resolve
+                                episode = "",
+                                watchType = ""
                             )
 
                             SearchResultRow(

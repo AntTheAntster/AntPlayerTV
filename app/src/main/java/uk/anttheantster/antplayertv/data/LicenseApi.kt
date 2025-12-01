@@ -15,7 +15,7 @@ data class LicenseCheckResult(
 )
 
 class LicenseApi(
-    private val baseUrl: String = "http://178.79.150.26:3000"
+    private val baseUrl: String = "https://api.anttheantster.uk"
 ) {
     private val client = OkHttpClient()
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()

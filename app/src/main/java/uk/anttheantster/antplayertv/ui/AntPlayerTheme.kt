@@ -12,7 +12,7 @@ private val AntPlayerDarkColorScheme = darkColorScheme(
     background = Color(0xFF050509),     // near-black
     onBackground = Color(0xFFF2F2F7),   // off-white text
     surface = Color(0xFF101018),
-    onSurface = Color(0xFFF2F2F7)
+    onSurface = Color(0xFFF2F2F7),
 )
 
 private val AntPlayerTypography = Typography()
