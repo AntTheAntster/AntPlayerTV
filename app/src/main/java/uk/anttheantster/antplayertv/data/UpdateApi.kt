@@ -14,7 +14,7 @@ data class UpdateInfo(
 )
 
 class UpdateApi(
-    private val baseUrl: String = "https://api.anttheantster.com"
+    private val baseUrl: String = "https://api.anttheantster.uk"
 ) {
     private val client = OkHttpClient()
 

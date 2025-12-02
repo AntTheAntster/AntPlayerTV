@@ -1,5 +1,6 @@
 package uk.anttheantster.antplayertv
 
+import android.net.Uri
 import android.os.Bundle
 import android.view.ContextThemeWrapper
 import android.view.ViewGroup
@@ -68,10 +69,10 @@ import uk.anttheantster.antplayertv.data.LicenseUtils
 import uk.anttheantster.antplayertv.data.LicenseApi
 import uk.anttheantster.antplayertv.data.UpdateApi
 import uk.anttheantster.antplayertv.data.UpdateInfo
-import uk.anttheantster.antplayertv.data.UpdateInstaller
 import uk.anttheantster.antplayertv.model.MediaItem
 import uk.anttheantster.antplayertv.ui.AntPlayerTheme
 import uk.anttheantster.antplayertv.ui.NavigationState
+import androidx.core.net.toUri
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -527,6 +528,8 @@ fun AntPlayerPlayer(
                     useController = true
                     controllerShowTimeoutMs = 5000 // auto-hide after 5s
 
+                    keepScreenOn = true
+
                     isFocusable = true
                     isFocusableInTouchMode = true
 
@@ -607,7 +610,34 @@ fun AntPlayerDetails(
                             color = MaterialTheme.colorScheme.onBackground
                         )
 
-                        Spacer(modifier = Modifier.height(10.dp))
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        // 🔹 META LINE for local items
+                        val localMetaParts = mutableListOf<String>()
+
+                        item.releaseYear
+                            ?.takeIf { it.isNotBlank() }
+                            ?.let { localMetaParts.add(it) }
+
+                        item.totalEpisodes?.let { count ->
+                            val label = if (count == 1) "1 episode" else "$count episodes"
+                            localMetaParts.add(label)
+                        }
+
+                        item.type
+                            ?.takeIf { it.isNotBlank() }
+                            ?.let { localMetaParts.add(it) }
+
+                        if (localMetaParts.isNotEmpty()) {
+                            Text(
+                                text = localMetaParts.joinToString(" • "),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                        } else {
+                            Spacer(modifier = Modifier.height(10.dp))
+                        }
 
                         Text(
                             text = item.description,
@@ -633,7 +663,7 @@ fun AntPlayerDetails(
                 }
             }
         } else {
-            // ───── Remote Ashi series: details + episodes, per-episode expand + play ─────
+            // ───── Remote Ashi series/movie: details + episodes, per-episode expand + play ─────
             val api = remember {
                 RemoteSearchApi(
                     baseUrl = "https://api.anttheantster.uk" // your Node server
@@ -695,13 +725,36 @@ fun AntPlayerDetails(
                         Column(
                             modifier = Modifier.weight(1f)
                         ) {
-                            Text(
-                                text = item.title,
-                                style = MaterialTheme.typography.headlineSmall,
-                                color = MaterialTheme.colorScheme.onBackground
-                            )
+                            // 🔹 META LINE for remote Ashi items (year + episode count)
+                            val remoteMetaParts = mutableListOf<String>()
 
-                            Spacer(modifier = Modifier.height(8.dp))
+                            // Derive year from details.airdate, e.g. "2012-04-05" or similar
+                            val releaseYearFromDetails = remember(details) {
+                                details?.airdate
+                                    ?.takeIf { it.isNotBlank() }
+                                    ?.let { air ->
+                                        Regex("(19\\d{2}|20\\d{2})")
+                                            .find(air)
+                                            ?.value
+                                    }
+                            }
+
+                            releaseYearFromDetails?.let { remoteMetaParts.add(it) }
+
+                            // Once episodes are loaded, we can show an episode count
+                            if (!loadingMeta && episodes.isNotEmpty()) {
+                                val label = if (episodes.size == 1) "Movie" else "${episodes.size} episodes"
+                                remoteMetaParts.add(label)
+                            }
+
+                            if (remoteMetaParts.isNotEmpty()) {
+                                Text(
+                                    text = remoteMetaParts.joinToString(" • "),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                            }
 
                             Text(
                                 text = "Age rating: Unknown",
@@ -727,64 +780,99 @@ fun AntPlayerDetails(
 
                             Spacer(modifier = Modifier.height(16.dp))
 
-                            if (loadingMeta) {
-                                Text(
-                                    text = "Loading episodes...",
-                                    color = MaterialTheme.colorScheme.onBackground
-                                )
-                            } else if (episodes.isEmpty()) {
-                                Text(
-                                    text = "No episodes found.",
-                                    color = MaterialTheme.colorScheme.onBackground
-                                )
-                            } else {
-                                Text(
-                                    text = "Episodes",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = MaterialTheme.colorScheme.onBackground
-                                )
-
-                                Spacer(modifier = Modifier.height(8.dp))
-
-                                val firstEpisodeFocusRequester = remember { FocusRequester() }
-
-                                // Once episodes load, focus the first one
-                                LaunchedEffect(episodes) {
-                                    if (episodes.isNotEmpty()) {
-                                        expandedEpisode = episodes.first()
-                                        firstEpisodeFocusRequester.requestFocus()
-                                    }
+                            when {
+                                loadingMeta -> {
+                                    Text(
+                                        text = "Loading episodes...",
+                                        color = MaterialTheme.colorScheme.onBackground
+                                    )
                                 }
 
-                                Column(
-                                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    episodes.forEachIndexed { index, episode ->
-                                        EpisodeRow(
-                                            episode = episode,
-                                            expanded = (episode == expandedEpisode),
-                                            seriesImage = item.image,
-                                            onSelectEpisode = {
-                                                expandedEpisode = episode
-                                            },
-                                            onPlayClicked = {
-                                                dialogEpisode = episode
-                                                showStreamDialog = true
-                                                loadingStreams = true
-                                                streamOptions = emptyList()
+                                episodes.isEmpty() -> {
+                                    Text(
+                                        text = "No episodes found.",
+                                        color = MaterialTheme.colorScheme.onBackground
+                                    )
+                                }
 
-                                                scope.launch {
-                                                    val options = api.getStreamOptions(episode.href)
-                                                    streamOptions = options
-                                                    loadingStreams = false
-                                                }
-                                            },
-                                            modifier = if (index == 0) {
-                                                Modifier.focusRequester(firstEpisodeFocusRequester)
-                                            } else {
-                                                Modifier
+                                episodes.size == 1 -> {
+                                    // ───── Movie / single-episode title ─────
+                                    val onlyEpisode = episodes.first()
+
+                                    Text(
+                                        text = "Movie",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = MaterialTheme.colorScheme.onBackground
+                                    )
+
+                                    Spacer(modifier = Modifier.height(8.dp))
+
+                                    TvButton(
+                                        text = "Play",
+                                        onClick = {
+                                            dialogEpisode = onlyEpisode
+                                            showStreamDialog = true
+                                            loadingStreams = true
+                                            streamOptions = emptyList()
+
+                                            scope.launch {
+                                                val options = api.getStreamOptions(onlyEpisode.href)
+                                                streamOptions = options
+                                                loadingStreams = false
                                             }
-                                        )
+                                        }
+                                    )
+                                }
+
+                                else -> {
+                                    Text(
+                                        text = "Episodes",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = MaterialTheme.colorScheme.onBackground
+                                    )
+
+                                    Spacer(modifier = Modifier.height(8.dp))
+
+                                    val firstEpisodeFocusRequester = remember { FocusRequester() }
+
+                                    // Once episodes load, focus the first one
+                                    LaunchedEffect(episodes) {
+                                        if (episodes.isNotEmpty()) {
+                                            expandedEpisode = episodes.first()
+                                            firstEpisodeFocusRequester.requestFocus()
+                                        }
+                                    }
+
+                                    Column(
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        episodes.forEachIndexed { index, episode ->
+                                            EpisodeRow(
+                                                episode = episode,
+                                                expanded = (episode == expandedEpisode),
+                                                seriesImage = item.image,
+                                                onSelectEpisode = {
+                                                    expandedEpisode = episode
+                                                },
+                                                onPlayClicked = {
+                                                    dialogEpisode = episode
+                                                    showStreamDialog = true
+                                                    loadingStreams = true
+                                                    streamOptions = emptyList()
+
+                                                    scope.launch {
+                                                        val options = api.getStreamOptions(episode.href)
+                                                        streamOptions = options
+                                                        loadingStreams = false
+                                                    }
+                                                },
+                                                modifier = if (index == 0) {
+                                                    Modifier.focusRequester(firstEpisodeFocusRequester)
+                                                } else {
+                                                    Modifier
+                                                }
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -793,7 +881,6 @@ fun AntPlayerDetails(
                     Spacer(modifier = Modifier.height(16.dp))
                 }
 
-                // ───── Stream options dialog (Sub/Dub/Original etc.) ─────
                 // ───── Stream options dialog (Sub/Dub/Original etc.) ─────
                 if (showStreamDialog) {
                     val cancelFocusRequester = remember { FocusRequester() }
@@ -889,6 +976,7 @@ fun AntPlayerDetails(
     }
 }
 
+
 @Composable
 fun TvButton(
     text: String,
@@ -930,6 +1018,15 @@ fun TvButton(
     }
 }
 
+data class SearchMeta(
+    val releaseYear: String?,
+    val totalEpisodes: Int?,
+    val type: String?,
+    val ageRating: String?,   // currently unknown – we’ll keep this null for now
+    val synopsis: String?
+)
+
+
 @Composable
 fun AntPlayerSearch(
     onItemSelected: (MediaItem) -> Unit,
@@ -940,22 +1037,20 @@ fun AntPlayerSearch(
 
     val api = remember {
         RemoteSearchApi(
-            baseUrl = "http://178.79.150.26:3000"
+            baseUrl = "https://api.anttheantster.uk"
         )
     }
 
     var query by remember { mutableStateOf("") }
-
-    // Results from the server
     var searchResults by remember { mutableStateOf<List<AshiSearchResult>>(emptyList()) }
-
-    // Simple loading indicator flag
     var isLoading by remember { mutableStateOf(false) }
 
-    // 🔹 Focus requester for the first result row
+    // 🔹 cache: key = result.href, value = SearchMeta
+    val metaCache = remember { mutableStateMapOf<String, SearchMeta>() }
+
     val firstResultFocusRequester = remember { FocusRequester() }
 
-    // When the query changes, call the server
+    // Main search call
     LaunchedEffect(query) {
         if (query.isBlank()) {
             searchResults = emptyList()
@@ -966,16 +1061,50 @@ fun AntPlayerSearch(
         }
     }
 
-    // 🔹 When results appear, move focus to the first row
+    // When results change, move focus to first row
     LaunchedEffect(searchResults) {
         if (searchResults.isNotEmpty()) {
             firstResultFocusRequester.requestFocus()
         }
     }
 
-    BackHandler {
-        onBack()
+    // 🔹 Enrich results with details + episodes metadata (top N only)
+    LaunchedEffect(searchResults) {
+        // Limit to first 8 results so we don't hammer the server
+        for (result in searchResults.take(8)) {
+            val key = result.href
+            if (metaCache.containsKey(key)) continue
+
+            try {
+                val details = api.getDetails(key)
+                val episodes = api.getEpisodes(key)
+
+                // year from airdate (same logic as details screen)
+                val releaseYear = details?.airdate
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { air ->
+                        Regex("(19\\d{2}|20\\d{2})").find(air)?.value
+                    }
+
+                val totalEpisodes = episodes.size
+                val type = if (totalEpisodes == 1) "Movie" else "TV"
+
+                val synopsis = details?.description?.takeIf { it.isNotBlank() }
+
+                metaCache[key] = SearchMeta(
+                    releaseYear = releaseYear,
+                    totalEpisodes = totalEpisodes,
+                    type = type,
+                    ageRating = null,     // still unknown for now
+                    synopsis = synopsis
+                )
+            } catch (_: Exception) {
+                // ignore metadata failure for this result
+            }
+        }
     }
+
+    BackHandler { onBack() }
 
     MaterialTheme {
         Column(
@@ -996,10 +1125,14 @@ fun AntPlayerSearch(
                 OutlinedTextField(
                     value = query,
                     onValueChange = { query = it },
-                    label = { Text("Search", color = MaterialTheme.colorScheme.onBackground) },
+                    label = {
+                        Text(
+                            "Search",
+                            color = MaterialTheme.colorScheme.onBackground
+                        )
+                    },
                     singleLine = true,
-                    modifier = Modifier
-                        .weight(1f)
+                    modifier = Modifier.weight(1f)
                 )
             }
 
@@ -1011,7 +1144,10 @@ fun AntPlayerSearch(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text("Searching.", color = MaterialTheme.colorScheme.onBackground)
+                        Text(
+                            "Searching.",
+                            color = MaterialTheme.colorScheme.onBackground
+                        )
                     }
                 }
 
@@ -1020,28 +1156,37 @@ fun AntPlayerSearch(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text("No results", color = MaterialTheme.colorScheme.onBackground)
+                        Text(
+                            "No results",
+                            color = MaterialTheme.colorScheme.onBackground
+                        )
                     }
                 }
 
                 searchResults.isEmpty() && query.isBlank() -> {
-                    // Nothing typed yet – show nothing
+                    // nothing yet
                 }
 
                 else -> {
-                    // We got results from the server
                     LazyColumn(
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                         modifier = Modifier.fillMaxSize()
                     ) {
                         itemsIndexed(searchResults) { index, result ->
-                            // Convert AshiSearchResult to MediaItem for UI & navigation
+                            val key = result.href
+                            val meta = metaCache[key]
+
+                            // Build MediaItem with metadata if we have it
                             val item = MediaItem(
-                                id = result.href,         // URL for details/episodes
+                                id = key,
                                 title = result.title,
-                                description = "",         // filled by details API later
+                                description = meta?.synopsis ?: "",
                                 image = result.image,
-                                streamUrl = ""            // no direct stream yet; details will resolve
+                                streamUrl = "",
+                                releaseYear = meta?.releaseYear,
+                                totalEpisodes = meta?.totalEpisodes,
+                                type = meta?.type,
+                                ageRating = meta?.ageRating
                             )
 
                             val rowModifier =
@@ -1089,6 +1234,7 @@ fun SearchResultRow(
             .onFocusChanged { state ->
                 isFocused = state.isFocused
             }
+            // clickable FIRST so OK/select works
             .clickable(onClick = onClick)
             .focusable()
             .padding(8.dp),
@@ -1113,7 +1259,7 @@ fun SearchResultRow(
             )
             Spacer(modifier = Modifier.height(4.dp))
 
-            // metadata line: year • episodes • type
+            // 🔹 metadata line: year • episodes/Movie • age rating
             val metaParts = mutableListOf<String>()
 
             item.releaseYear
@@ -1121,13 +1267,17 @@ fun SearchResultRow(
                 ?.let { metaParts.add(it) }
 
             item.totalEpisodes?.let { count ->
-                val label = if (count == 1) "1 episode" else "$count episodes"
+                val label = when {
+                    item.type?.contains("movie", ignoreCase = true) == true -> "Movie"
+                    count == 1 -> "Movie"
+                    else -> "$count episodes"
+                }
                 metaParts.add(label)
             }
 
-            item.type
+            item.ageRating
                 ?.takeIf { it.isNotBlank() }
-                ?.let { metaParts.add(it) }
+                ?.let { metaParts.add("Age: $it") }
 
             if (metaParts.isNotEmpty()) {
                 Text(
@@ -1138,12 +1288,15 @@ fun SearchResultRow(
                 Spacer(modifier = Modifier.height(4.dp))
             }
 
-            Text(
-                text = item.description,
-                style = MaterialTheme.typography.bodySmall,
-                color = Color.LightGray,
-                maxLines = 3
-            )
+            // 🔹 Synopsis (only if available)
+            if (!item.description.isNullOrBlank()) {
+                Text(
+                    text = item.description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.LightGray,
+                    maxLines = 3
+                )
+            }
         }
     }
 }
@@ -1469,10 +1622,17 @@ fun UpdateScreen(
 ) {
     val context = LocalContext.current
 
-    var isDownloading by remember { mutableStateOf(false) }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
-
     val primaryFocusRequester = remember { FocusRequester() }
+
+    // Derive a filename from the URL (fallback if parsing fails)
+    val apkFileName = remember(info.apkUrl) {
+        val lastSegment = try {
+            info.apkUrl.toUri().lastPathSegment
+        } catch (e: Exception) {
+            null
+        }
+        lastSegment ?: "AntPlayerTV-latest.apk"
+    }
 
     // Auto-focus the Download button when this screen appears
     LaunchedEffect(Unit) {
@@ -1527,42 +1687,20 @@ fun UpdateScreen(
                     Spacer(modifier = Modifier.height(16.dp))
                 }
 
-                if (errorMessage != null) {
-                    Text(
-                        text = errorMessage!!,
-                        color = Color.Red,
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                }
-
-                if (!isDownloading) {
-                    TvButton(
-                        text = "Download & Install",
-                        onClick = {
-                            isDownloading = true
-                            errorMessage = null
-                            UpdateInstaller.downloadAndInstall(
-                                context = context,
-                                url = info.apkUrl,
-                                onStarted = {
-                                    // You could keep them on this screen, but it's safe to proceed
-                                    onFinished()
-                                },
-                                onError = { msg ->
-                                    isDownloading = false
-                                    errorMessage = msg
-                                }
-                            )
-                        },
-                        modifier = Modifier.focusRequester(primaryFocusRequester)
-                    )
-                } else {
-                    Text(
-                        text = "Downloading update...",
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                }
+                TvButton(
+                    text = "Download & Install",
+                    onClick = {
+                        // Fire-and-forget download + install
+                        UpdateInstaller.downloadAndInstall(
+                            context = context,
+                            apkUrl = info.apkUrl,
+                            fileName = apkFileName
+                        )
+                        // We let the user proceed into the app; installer UI will be on top
+                        onFinished()
+                    },
+                    modifier = Modifier.focusRequester(primaryFocusRequester)
+                )
 
                 Spacer(modifier = Modifier.height(16.dp))
 
