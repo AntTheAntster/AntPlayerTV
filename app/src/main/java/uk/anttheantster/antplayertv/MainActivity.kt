@@ -62,6 +62,7 @@ import uk.anttheantster.antplayertv.data.AshiEpisode
 import uk.anttheantster.antplayertv.data.AshiDetails
 import uk.anttheantster.antplayertv.data.AshiSearchResult
 import uk.anttheantster.antplayertv.data.ContentRepository
+import uk.anttheantster.antplayertv.data.EpisodeProgress
 import uk.anttheantster.antplayertv.data.ProgressRepository
 import uk.anttheantster.antplayertv.data.RemoteSearchApi
 import uk.anttheantster.antplayertv.data.StreamOption
@@ -383,6 +384,15 @@ fun MediaCard(item: MediaItem, onClick: () -> Unit) {
         label = "cardScale"
     )
 
+    // For remote shows like "Title - Ep 3 (Sub)", show just "Title" on the card
+    val displayTitle by remember(item.title) {
+        mutableStateOf(
+            item.title
+                .substringBefore(" - Ep ")
+                .ifBlank { item.title }
+        )
+    }
+
     Column(
         modifier = Modifier
             .width(200.dp)
@@ -416,7 +426,7 @@ fun MediaCard(item: MediaItem, onClick: () -> Unit) {
                 .clip(RoundedCornerShape(16.dp))
         )
         Text(
-            text = item.title,
+            text = displayTitle,
             color = MaterialTheme.colorScheme.onSurface,
             style = MaterialTheme.typography.bodyMedium,
             modifier = Modifier
@@ -619,7 +629,7 @@ fun AntPlayerPlayer(
     }
 
     // Release player when leaving
-    DisposableEffect(Unit) {
+    DisposableEffect(exoPlayer) {
         onDispose { exoPlayer.release() }
     }
 
@@ -670,10 +680,9 @@ fun AntPlayerPlayer(
                 PlayerView(themedContext).apply {
                     player = exoPlayer
                     useController = true
-                    controllerShowTimeoutMs = 5000 // auto-hide after 5s
+                    controllerShowTimeoutMs = 5000
 
                     keepScreenOn = true
-
                     isFocusable = true
                     isFocusableInTouchMode = true
 
@@ -687,6 +696,11 @@ fun AntPlayerPlayer(
             },
             update = { view ->
                 playerViewRef = view
+
+                // 🔹 Ensure the view is always bound to the *current* player
+                if (view.player !== exoPlayer) {
+                    view.player = exoPlayer
+                }
             }
         )
 
@@ -710,11 +724,12 @@ fun AntPlayerDetails(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    // local/progress lookup is always by item.id
+    val db = remember { AntPlayerDatabase.getInstance(context) }
+    val progressRepo = remember { ProgressRepository(db.progressDao()) }
+
+    // local/progress lookup is always by item.id (used only for non-remote items)
     val resumePositionMs by produceState<Long?>(initialValue = null, item) {
-        val db = AntPlayerDatabase.getInstance(context)
-        val repo = ProgressRepository(db.progressDao())
-        value = repo.getProgressFor(item.id)
+        value = progressRepo.getProgressFor(item.id)
     }
 
     // Heuristic: remote Ashi "series" item = no direct streamUrl but special id
@@ -807,10 +822,11 @@ fun AntPlayerDetails(
                 }
             }
         } else {
-            // ───── Remote Ashi series/movie: details + episodes, per-episode expand + play ─────
+            // Remote series branch…
+
             val api = remember {
                 RemoteSearchApi(
-                    baseUrl = "https://api.anttheantster.uk" // your Node server
+                    baseUrl = "https://api.anttheantster.uk"
                 )
             }
 
@@ -819,21 +835,33 @@ fun AntPlayerDetails(
             var expandedEpisode by remember { mutableStateOf<AshiEpisode?>(null) }
             var loadingMeta by remember { mutableStateOf(true) }
 
-            // For the stream dialog
+            // NEW: per-episode progress + latest episode
+            var episodeProgressMap by remember { mutableStateOf<Map<Int, EpisodeProgress>>(emptyMap()) }
+            var latestEpisodeProgress by remember { mutableStateOf<EpisodeProgress?>(null) }
+
+            // Stream dialog stuff…
             var dialogEpisode by remember { mutableStateOf<AshiEpisode?>(null) }
             var showStreamDialog by remember { mutableStateOf(false) }
             var streamOptions by remember { mutableStateOf<List<StreamOption>>(emptyList()) }
             var loadingStreams by remember { mutableStateOf(false) }
 
-            // Load show details + episodes once for this item
+            // Load details, episodes and progress for this series
             LaunchedEffect(item.id) {
                 loadingMeta = true
+
                 val info = api.getDetails(item.id)
                 val eps = api.getEpisodes(item.id)
+
                 details = info
                 episodes = eps
-                expandedEpisode = eps.firstOrNull()     // start with first expanded
+                expandedEpisode = eps.firstOrNull()
                 loadingMeta = false
+
+                // 🔹 Load progress
+                val seriesId = item.id.substringBefore("#")
+                val progressList = progressRepo.getEpisodeProgressForSeries(seriesId)
+                episodeProgressMap = progressList.associateBy { it.episodeNumber }
+                latestEpisodeProgress = progressRepo.getLatestEpisodeForSeries(seriesId)
             }
 
             val scrollState = rememberScrollState()
@@ -922,6 +950,40 @@ fun AntPlayerDetails(
                                 color = Color.LightGray
                             )
 
+                            // 🔹 Resume latest episode (if applicable)
+                            val latest = latestEpisodeProgress
+                            if (latest != null) {
+                                val dur = latest.durationMs
+                                val pos = latest.positionMs
+                                val finishedThreshold = 30_000L
+
+                                val canResume = dur > 0L &&
+                                        pos > 10_000L &&
+                                        dur - pos > finishedThreshold
+
+                                if (canResume) {
+                                    Spacer(modifier = Modifier.height(16.dp))
+
+                                    TvButton(
+                                        text = "Resume Episode ${latest.episodeNumber}",
+                                        onClick = {
+                                            val mediaItemToResume = MediaItem(
+                                                id = latest.mediaId,
+                                                title = latest.title,
+                                                description = details?.description ?: item.description,
+                                                image = latest.image ?: item.image,
+                                                streamUrl = latest.streamUrl,
+                                                releaseYear = item.releaseYear,
+                                                totalEpisodes = item.totalEpisodes,
+                                                type = item.type,
+                                                ageRating = item.ageRating
+                                            )
+                                            onResume(mediaItemToResume, latest.positionMs)
+                                        }
+                                    )
+                                }
+                            }
+
                             Spacer(modifier = Modifier.height(16.dp))
 
                             when {
@@ -990,15 +1052,65 @@ fun AntPlayerDetails(
                                     Column(
                                         verticalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
+                                        val FINISHED_THRESHOLD_MS = 30_000L
+
                                         episodes.forEachIndexed { index, episode ->
+                                            val epProgress = episodeProgressMap[episode.number]
+
+                                            val (statusText, canResume, isFinished) = if (epProgress != null && epProgress.durationMs > 0L) {
+                                                val pos = epProgress.positionMs
+                                                val dur = epProgress.durationMs
+
+                                                when {
+                                                    dur - pos <= FINISHED_THRESHOLD_MS ->
+                                                        Triple("Finished", false, true)
+
+                                                    pos > 10_000L ->
+                                                        Triple(
+                                                            "Stopped at ${formatTimeMs(pos)} / ${formatTimeMs(dur)}",
+                                                            true,
+                                                            false
+                                                        )
+
+                                                    else ->
+                                                        Triple(null, false, false)
+                                                }
+                                            } else {
+                                                Triple(null, false, false)
+                                            }
+
+                                            // 🔹 Build lambdas for Resume / Restart
+                                            val onResumeClick: (() -> Unit)? =
+                                                if (canResume && epProgress != null) {
+                                                    {
+                                                        val mediaItemToResume = MediaItem(
+                                                            id = epProgress.mediaId,
+                                                            title = epProgress.title,
+                                                            description = details?.description ?: item.description,
+                                                            image = epProgress.image ?: item.image,
+                                                            streamUrl = epProgress.streamUrl,
+                                                            releaseYear = item.releaseYear,
+                                                            totalEpisodes = item.totalEpisodes,
+                                                            type = item.type,
+                                                            ageRating = item.ageRating
+                                                        )
+                                                        onResume(mediaItemToResume, epProgress.positionMs)
+                                                    }
+                                                } else {
+                                                    null
+                                                }
+
                                             EpisodeRow(
                                                 episode = episode,
                                                 expanded = (episode == expandedEpisode),
                                                 seriesImage = item.image,
+                                                status = statusText,
                                                 onSelectEpisode = {
                                                     expandedEpisode = episode
                                                 },
+                                                onResumeClicked = onResumeClick,
                                                 onPlayClicked = {
+                                                    // "Play from beginning" → use your existing stream dialog behaviour
                                                     dialogEpisode = episode
                                                     showStreamDialog = true
                                                     loadingStreams = true
@@ -1487,7 +1599,9 @@ fun EpisodeRow(
     episode: AshiEpisode,
     expanded: Boolean,
     seriesImage: String,
+    status: String?,
     onSelectEpisode: () -> Unit,
+    onResumeClicked: (() -> Unit)?,   // NEW
     onPlayClicked: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -1529,6 +1643,16 @@ fun EpisodeRow(
             color = MaterialTheme.colorScheme.onSurface
         )
 
+        // 🔹 Status line
+        if (!status.isNullOrBlank()) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = status,
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.LightGray
+            )
+        }
+
         // Expanded view: thumbnail + Play button
         if (expanded) {
             Spacer(modifier = Modifier.height(8.dp))
@@ -1537,7 +1661,7 @@ fun EpisodeRow(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 AsyncImage(
-                    model = seriesImage,   // fallback to series/title thumbnail
+                    model = seriesImage,
                     contentDescription = "Episode ${episode.number}",
                     modifier = Modifier
                         .height(120.dp)
@@ -1556,10 +1680,24 @@ fun EpisodeRow(
 
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    TvButton(
-                        text = "Play Episode ${episode.number}",
-                        onClick = onPlayClicked
-                    )
+                    if (onResumeClicked != null) {
+                        // Partially watched episode → Show Resume + Restart
+                        TvButton(
+                            text = "Resume",
+                            onClick = onResumeClicked
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        TvButton(
+                            text = "Play from beginning",
+                            onClick = onPlayClicked
+                        )
+                    } else {
+                        // Never watched OR treated as finished → just Restart
+                        TvButton(
+                            text = "Play from beginning",
+                            onClick = onPlayClicked
+                        )
+                    }
                 }
             }
         }
@@ -1792,6 +1930,19 @@ fun AntPlayerRoot() {
                 }
             }
         }
+    }
+}
+
+private fun formatTimeMs(ms: Long): String {
+    val totalSeconds = ms / 1000
+    val hours = totalSeconds / 3600
+    val minutes = (totalSeconds % 3600) / 60
+    val seconds = totalSeconds % 60
+
+    return if (hours > 0) {
+        String.format("%d:%02d:%02d", hours, minutes, seconds)
+    } else {
+        String.format("%02d:%02d", minutes, seconds)
     }
 }
 
