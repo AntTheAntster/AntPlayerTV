@@ -101,6 +101,11 @@ fun AntPlayerTVApp() {
         mutableStateOf<NavigationState?>(null)
     }
 
+    // NEW: specifically for returning from the Player screen
+    var playerReturnState by remember {
+        mutableStateOf<NavigationState?>(null)
+    }
+
     var searchUiState by remember {
         mutableStateOf(SearchUiState())
     }
@@ -146,8 +151,8 @@ fun AntPlayerTVApp() {
             AntPlayerDetails(
                 item = state.item,
                 onPlay = { playableItem ->
-                    // Remember we're coming from this Details screen
-                    previousState = state
+                    // Player should return to *this* Details screen
+                    playerReturnState = state
                     navState = NavigationState.Player(
                         playableItem,
                         startPositionMs = null
@@ -155,13 +160,14 @@ fun AntPlayerTVApp() {
                 },
                 onResume = { playableItem, resumeMs ->
                     // Same for resume
-                    previousState = state
+                    playerReturnState = state
                     navState = NavigationState.Player(
                         playableItem,
                         startPositionMs = resumeMs
                     )
                 },
                 onBack = {
+                    // Details still goes back to where it was opened from (Home/Search)
                     navState = previousState ?: NavigationState.Home
                 }
             )
@@ -172,10 +178,13 @@ fun AntPlayerTVApp() {
                 mediaItem = state.item,
                 startPositionMs = state.startPositionMs,
                 onBack = {
-                    navState = previousState ?: NavigationState.Home
+                    // Prefer the state we explicitly stored for the Player
+                    navState = playerReturnState
+                        ?: previousState       // fallback if something weird happens
+                                ?: NavigationState.Home
                 },
                 onAutoPlayNext = { nextItem ->
-                    // Keep previousState pointing at the same Details as before
+                    // Keep returning to the same Details as before
                     navState = NavigationState.Player(
                         nextItem,
                         startPositionMs = 0L
