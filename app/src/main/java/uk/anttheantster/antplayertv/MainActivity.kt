@@ -73,6 +73,8 @@ import uk.anttheantster.antplayertv.model.MediaItem
 import uk.anttheantster.antplayertv.ui.AntPlayerTheme
 import uk.anttheantster.antplayertv.ui.NavigationState
 import androidx.core.net.toUri
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -98,6 +100,10 @@ fun AntPlayerTVApp() {
         mutableStateOf<NavigationState?>(null)
     }
 
+    var searchUiState by remember {
+        mutableStateOf(SearchUiState())
+    }
+
     when (val state = navState) {
         is NavigationState.Home -> {
             AntPlayerHome(
@@ -117,6 +123,10 @@ fun AntPlayerTVApp() {
 
         is NavigationState.Search -> {
             AntPlayerSearch(
+                searchUiState = searchUiState,
+                onSearchStateChanged = { newState ->
+                    searchUiState = newState
+                },
                 onItemSelected = { item ->
                     previousState = NavigationState.Search
                     navState = NavigationState.Details(item)
@@ -135,12 +145,16 @@ fun AntPlayerTVApp() {
             AntPlayerDetails(
                 item = state.item,
                 onPlay = { playableItem ->
+                    // Remember we're coming from this Details screen
+                    previousState = state
                     navState = NavigationState.Player(
                         playableItem,
                         startPositionMs = null
                     )
                 },
                 onResume = { playableItem, resumeMs ->
+                    // Same for resume
+                    previousState = state
                     navState = NavigationState.Player(
                         playableItem,
                         startPositionMs = resumeMs
@@ -156,7 +170,16 @@ fun AntPlayerTVApp() {
             AntPlayerPlayer(
                 mediaItem = state.item,
                 startPositionMs = state.startPositionMs,
-                onBack = { navState = NavigationState.Details(state.item) }
+                onBack = {
+                    navState = previousState ?: NavigationState.Home
+                },
+                onAutoPlayNext = { nextItem ->
+                    // Keep previousState pointing at the same Details as before
+                    navState = NavigationState.Player(
+                        nextItem,
+                        startPositionMs = 0L
+                    )
+                }
             )
         }
     }
@@ -170,8 +193,17 @@ fun AntPlayerHome(
 ) {
     val context = LocalContext.current
 
-    val contentRepository = remember { ContentRepository(context) }
-    val allItems by remember { mutableStateOf(contentRepository.loadAllItems()) }
+    var allItems by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(true) }
+
+    // 🔹 Load content off the main thread
+    LaunchedEffect(Unit) {
+        isLoading = true
+        allItems = withContext(Dispatchers.IO) {
+            ContentRepository(context).loadAllItems()
+        }
+        isLoading = false
+    }
 
     // Continue Watching from DB
     val continueWatchingItems by produceState(initialValue = emptyList<MediaItem>(), context) {
@@ -393,12 +425,37 @@ fun MediaCard(item: MediaItem, onClick: () -> Unit) {
     }
 }
 
+data class EpisodeIdInfo(
+    val seriesId: String,
+    val episodeNumber: Int,
+    val watchLabel: String
+)
+
+private fun parseEpisodeId(id: String): EpisodeIdInfo? {
+    // Format: "<seriesId>#ep<episodeNumber>#<label>"
+    val parts = id.split("#")
+    if (parts.size < 3) return null
+
+    val seriesId = parts[0]
+    val epPart = parts[1]          // e.g. "ep12"
+    val label = parts[2]           // e.g. "Hardsub English"
+
+    val number = epPart.removePrefix("ep").toIntOrNull() ?: return null
+
+    return EpisodeIdInfo(
+        seriesId = seriesId,
+        episodeNumber = number,
+        watchLabel = label
+    )
+}
+
 @OptIn(UnstableApi::class)
 @Composable
 fun AntPlayerPlayer(
     mediaItem: MediaItem,
     startPositionMs: Long?,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onAutoPlayNext: (MediaItem) -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -430,6 +487,21 @@ fun AntPlayerPlayer(
     val db = remember { AntPlayerDatabase.getInstance(context) }
     val repository = remember { ProgressRepository(db.progressDao()) }
 
+    // API for fetching next episode stream
+    val remoteApi = remember {
+        RemoteSearchApi(
+            baseUrl = "https://api.anttheantster.uk"
+        )
+    }
+
+    // Info parsed from the encoded id: "<seriesId>#ep<episodeNumber>#<label>"
+    val episodeInfo = remember(mediaItem.id) {
+        parseEpisodeId(mediaItem.id)
+    }
+
+    // Ensures we only trigger autoplay once per item
+    var hasTriggeredAutoplay by remember(mediaItem.id) { mutableStateOf(false) }
+
     // ExoPlayer instance
     val exoPlayer = remember(mediaItem.streamUrl) {
         ExoPlayer.Builder(context).build().apply {
@@ -437,6 +509,78 @@ fun AntPlayerPlayer(
             setMediaItem(media)
             prepare()
             playWhenReady = true
+
+            // Listen for playback ending to auto-play next episode
+            addListener(object : Player.Listener {
+                override fun onPlaybackStateChanged(state: Int) {
+                    if (state == Player.STATE_ENDED && !hasTriggeredAutoplay) {
+                        hasTriggeredAutoplay = true
+
+                        scope.launch {
+                            // Save "finished" progress for this episode
+                            val finalDuration = duration.coerceAtLeast(0L)
+                            val finalPosition = finalDuration
+
+                            try {
+                                repository.saveProgress(mediaItem, finalPosition, finalDuration)
+                            } catch (_: Exception) {
+                                // ignore errors – not fatal
+                            }
+
+                            val info = episodeInfo ?: return@launch
+
+                            try {
+                                // Fetch all episodes for this series
+                                val episodes = remoteApi.getEpisodes(info.seriesId)
+                                val currentIndex = episodes.indexOfFirst { it.number == info.episodeNumber }
+
+                                if (currentIndex == -1 || currentIndex + 1 >= episodes.size) {
+                                    // No next episode; do nothing
+                                    return@launch
+                                }
+
+                                val nextEpisode = episodes[currentIndex + 1]
+
+                                // Fetch stream options for next episode
+                                val options = remoteApi.getStreamOptions(nextEpisode.href)
+
+                                // Prefer same watch label (sub/dub/etc), otherwise first
+                                val selectedOption = options.firstOrNull {
+                                    it.label == info.watchLabel
+                                } ?: options.firstOrNull()
+
+                                if (selectedOption == null || selectedOption.url.isBlank()) {
+                                    return@launch
+                                }
+
+                                // Try to derive the base title (before " - Ep X (...)")
+                                val baseTitle = mediaItem.title
+                                    .substringBefore(" - Ep ")
+                                    .ifBlank { mediaItem.title }
+
+                                val nextMediaItem = MediaItem(
+                                    id = "${info.seriesId}#ep${nextEpisode.number}#${selectedOption.label}",
+                                    title = "$baseTitle - Ep ${nextEpisode.number} (${selectedOption.label})",
+                                    description = mediaItem.description,
+                                    image = mediaItem.image,
+                                    streamUrl = selectedOption.url,
+                                    releaseYear = mediaItem.releaseYear,
+                                    totalEpisodes = mediaItem.totalEpisodes,
+                                    type = mediaItem.type,
+                                    ageRating = mediaItem.ageRating
+                                )
+
+                                // Jump to the next episode on the main thread
+                                withContext(Dispatchers.Main) {
+                                    onAutoPlayNext(nextMediaItem)
+                                }
+                            } catch (_: Exception) {
+                                // Network or parsing issue – silently skip autoplay
+                            }
+                        }
+                    }
+                }
+            })
         }
     }
 
@@ -1026,9 +1170,15 @@ data class SearchMeta(
     val synopsis: String?
 )
 
+data class SearchUiState(
+    val lastQuery: String = "",
+    val lastResults: List<AshiSearchResult> = emptyList()
+)
 
 @Composable
 fun AntPlayerSearch(
+    searchUiState: SearchUiState,
+    onSearchStateChanged: (SearchUiState) -> Unit,
     onItemSelected: (MediaItem) -> Unit,
     onBack: () -> Unit
 ) {
@@ -1041,36 +1191,65 @@ fun AntPlayerSearch(
         )
     }
 
-    var query by remember { mutableStateOf("") }
-    var searchResults by remember { mutableStateOf<List<AshiSearchResult>>(emptyList()) }
+    var query by remember { mutableStateOf(searchUiState.lastQuery) }
+    var searchResults by remember {
+        mutableStateOf<List<AshiSearchResult>>(searchUiState.lastResults)
+    }
     var isLoading by remember { mutableStateOf(false) }
 
-    // 🔹 cache: key = result.href, value = SearchMeta
+    // cache: key = href, value = metadata
     val metaCache = remember { mutableStateMapOf<String, SearchMeta>() }
 
     val firstResultFocusRequester = remember { FocusRequester() }
 
-    // Main search call
+    // 🔹 Track whether the text field currently has focus
+    var searchFieldFocused by remember { mutableStateOf(false) }
+
+    // Live search
     LaunchedEffect(query) {
         if (query.isBlank()) {
             searchResults = emptyList()
+            onSearchStateChanged(
+                SearchUiState(
+                    lastQuery = "",
+                    lastResults = emptyList()
+                )
+            )
         } else {
             isLoading = true
-            searchResults = api.search(query)
+
+            val results = if (
+                query == searchUiState.lastQuery &&
+                searchUiState.lastResults.isNotEmpty()
+            ) {
+                // Reuse cached results for the same query
+                searchUiState.lastResults
+            } else {
+                // Fresh search
+                api.search(query)
+            }
+
+            searchResults = results
             isLoading = false
+
+            onSearchStateChanged(
+                SearchUiState(
+                    lastQuery = query,
+                    lastResults = results
+                )
+            )
         }
     }
 
-    // When results change, move focus to first row
-    LaunchedEffect(searchResults) {
-        if (searchResults.isNotEmpty()) {
+    // 🔹 Only auto-focus results when the text field is NOT focused
+    LaunchedEffect(searchResults, searchFieldFocused) {
+        if (!searchFieldFocused && searchResults.isNotEmpty()) {
             firstResultFocusRequester.requestFocus()
         }
     }
 
-    // 🔹 Enrich results with details + episodes metadata (top N only)
+    // Enrich top N results with details/episodes metadata
     LaunchedEffect(searchResults) {
-        // Limit to first 8 results so we don't hammer the server
         for (result in searchResults.take(8)) {
             val key = result.href
             if (metaCache.containsKey(key)) continue
@@ -1079,7 +1258,6 @@ fun AntPlayerSearch(
                 val details = api.getDetails(key)
                 val episodes = api.getEpisodes(key)
 
-                // year from airdate (same logic as details screen)
                 val releaseYear = details?.airdate
                     ?.takeIf { it.isNotBlank() }
                     ?.let { air ->
@@ -1088,18 +1266,17 @@ fun AntPlayerSearch(
 
                 val totalEpisodes = episodes.size
                 val type = if (totalEpisodes == 1) "Movie" else "TV"
-
                 val synopsis = details?.description?.takeIf { it.isNotBlank() }
 
                 metaCache[key] = SearchMeta(
                     releaseYear = releaseYear,
                     totalEpisodes = totalEpisodes,
                     type = type,
-                    ageRating = null,     // still unknown for now
+                    ageRating = null,
                     synopsis = synopsis
                 )
             } catch (_: Exception) {
-                // ignore metadata failure for this result
+                // ignore this result if metadata fails
             }
         }
     }
@@ -1132,7 +1309,11 @@ fun AntPlayerSearch(
                         )
                     },
                     singleLine = true,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier
+                        .weight(1f)
+                        .onFocusChanged { state ->
+                            searchFieldFocused = state.isFocused
+                        }
                 )
             }
 
@@ -1164,7 +1345,7 @@ fun AntPlayerSearch(
                 }
 
                 searchResults.isEmpty() && query.isBlank() -> {
-                    // nothing yet
+                    // nothing typed yet
                 }
 
                 else -> {
@@ -1176,7 +1357,6 @@ fun AntPlayerSearch(
                             val key = result.href
                             val meta = metaCache[key]
 
-                            // Build MediaItem with metadata if we have it
                             val item = MediaItem(
                                 id = key,
                                 title = result.title,
@@ -1205,6 +1385,7 @@ fun AntPlayerSearch(
         }
     }
 }
+
 
 @Composable
 fun SearchResultRow(

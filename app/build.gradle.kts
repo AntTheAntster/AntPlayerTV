@@ -13,8 +13,8 @@ android {
         applicationId = "uk.anttheantster.antplayertv"
         minSdk = 23
         targetSdk = 36
-        versionCode = 106
-        versionName = "1.0.6"
+        versionCode = 108
+        versionName = "1.0.8"
 
     }
 

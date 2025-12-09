@@ -109,13 +109,18 @@ class RemoteSearchApi(
                 val arr = JSONArray(body)
                 val result = mutableListOf<AshiEpisode>()
 
+                // ✅ Track which episode numbers we've already added
+                val seenNumbers = mutableSetOf<Int>()
+
                 for (i in 0 until arr.length()) {
                     val obj = arr.getJSONObject(i)
                     if (obj.has("error")) continue  // skip error items
 
                     val number = obj.optInt("number", -1)
                     val href = obj.optString("href", "")
-                    if (number > 0 && href.isNotBlank()) {
+
+                    if (number > 0 && href.isNotBlank() && seenNumbers.add(number)) {
+                        // Only the *first* occurrence for each episode number is added
                         result.add(AshiEpisode(number, href))
                     }
                 }
