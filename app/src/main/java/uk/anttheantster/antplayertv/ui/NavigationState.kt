@@ -11,5 +11,6 @@ sealed class NavigationState {
     ) : NavigationState()
     object Search : NavigationState()
     object Settings : NavigationState()
-}
 
+    data class Watchlist(val id: Long, val name: String) : NavigationState()
+}

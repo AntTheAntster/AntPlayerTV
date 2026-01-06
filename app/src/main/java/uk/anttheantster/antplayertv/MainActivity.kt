@@ -1,6 +1,10 @@
 package uk.anttheantster.antplayertv
 
 import android.net.Uri
+import androidx.core.view.WindowCompat
+import androidx.compose.runtime.collectAsState
+import uk.anttheantster.antplayertv.data.watchlist.WatchlistRepository
+import uk.anttheantster.antplayertv.ui.AntAppScaffold
 import android.os.Bundle
 import android.view.ContextThemeWrapper
 import android.view.ViewGroup
@@ -21,6 +25,9 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
@@ -76,6 +83,7 @@ import uk.anttheantster.antplayertv.ui.NavigationState
 import androidx.core.net.toUri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import uk.anttheantster.antplayertv.ui.LocalAntToast
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -94,103 +102,107 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun AntPlayerTVApp() {
-    var navState by remember {
-        mutableStateOf<NavigationState>(NavigationState.Home)
+    var navState by remember { mutableStateOf<NavigationState>(NavigationState.Home) }
+    var previousState by remember { mutableStateOf<NavigationState?>(null) }
+
+    // specifically for returning from Player screen
+    var playerReturnState by remember { mutableStateOf<NavigationState?>(null) }
+
+    var searchUiState by remember { mutableStateOf(SearchUiState()) }
+
+    val context = LocalContext.current
+    val db = remember { AntPlayerDatabase.getInstance(context) }
+    val watchlistRepo = remember { WatchlistRepository(db.watchlistDao()) }
+
+    LaunchedEffect(Unit) {
+        watchlistRepo.ensureDefaultWatchLater()
     }
-    var previousState by remember {
-        mutableStateOf<NavigationState?>(null)
+
+    val watchlists by watchlistRepo.observeWatchlists().collectAsState(initial = emptyList())
+
+    fun navigateTo(target: NavigationState) {
+        previousState = navState
+        navState = target
     }
 
-    // NEW: specifically for returning from the Player screen
-    var playerReturnState by remember {
-        mutableStateOf<NavigationState?>(null)
-    }
+    AntAppScaffold(
+        current = navState,
+        watchlists = watchlists,
+        onNavigate = { navigateTo(it) }
+    ) { modifier, openDrawer ->
 
-    var searchUiState by remember {
-        mutableStateOf(SearchUiState())
-    }
+        when (val state = navState) {
+            is NavigationState.Home -> {
+                AntPlayerHome(
+                    onItemSelected = { item ->
+                        previousState = NavigationState.Home
+                        navState = NavigationState.Details(item)
+                    },
+                    onSearch = { navState = NavigationState.Search },
+                    onSettings = {
+                        previousState = NavigationState.Home
+                        navState = NavigationState.Settings
+                    }
+                )
+            }
 
-    when (val state = navState) {
-        is NavigationState.Home -> {
-            AntPlayerHome(
-                onItemSelected = { item ->
-                    previousState = NavigationState.Home
-                    navState = NavigationState.Details(item)
-                },
-                onSearch = {
-                    navState = NavigationState.Search
-                },
-                onSettings = {
-                    previousState = NavigationState.Home
-                    navState = NavigationState.Settings
-                }
-            )
-        }
+            is NavigationState.Search -> {
+                AntPlayerSearch(
+                    searchUiState = searchUiState,
+                    onSearchStateChanged = { searchUiState = it },
+                    onItemSelected = { item ->
+                        previousState = NavigationState.Search
+                        navState = NavigationState.Details(item)
+                    },
+                    onBack = { navState = NavigationState.Home }
+                )
+            }
 
-        is NavigationState.Search -> {
-            AntPlayerSearch(
-                searchUiState = searchUiState,
-                onSearchStateChanged = { newState ->
-                    searchUiState = newState
-                },
-                onItemSelected = { item ->
-                    previousState = NavigationState.Search
-                    navState = NavigationState.Details(item)
-                },
-                onBack = { navState = NavigationState.Home }
-            )
-        }
+            is NavigationState.Settings -> {
+                AntPlayerSettings(
+                    onBack = { navState = NavigationState.Home }
+                )
+            }
 
-        is NavigationState.Settings -> {
-            AntPlayerSettings(
-                onBack = { navState = NavigationState.Home }
-            )
-        }
+            is NavigationState.Watchlist -> {
+                AntPlayerWatchlistScreen(
+                    watchlistId = state.id,
+                    watchlistName = state.name,
+                    onItemSelected = { item ->
+                        previousState = NavigationState.Watchlist(state.id, state.name)
+                        navState = NavigationState.Details(item)
+                    },
+                    onBack = { navState = NavigationState.Home }
+                )
+            }
 
-        is NavigationState.Details -> {
-            AntPlayerDetails(
-                item = state.item,
-                onPlay = { playableItem ->
-                    // Player should return to *this* Details screen
-                    playerReturnState = state
-                    navState = NavigationState.Player(
-                        playableItem,
-                        startPositionMs = null
-                    )
-                },
-                onResume = { playableItem, resumeMs ->
-                    // Same for resume
-                    playerReturnState = state
-                    navState = NavigationState.Player(
-                        playableItem,
-                        startPositionMs = resumeMs
-                    )
-                },
-                onBack = {
-                    // Details still goes back to where it was opened from (Home/Search)
-                    navState = previousState ?: NavigationState.Home
-                }
-            )
-        }
+            is NavigationState.Details -> {
+                AntPlayerDetails(
+                    item = state.item,
+                    onPlay = { playableItem ->
+                        playerReturnState = state
+                        navState = NavigationState.Player(playableItem, startPositionMs = null)
+                    },
+                    onResume = { playableItem, resumeMs ->
+                        playerReturnState = state
+                        navState = NavigationState.Player(playableItem, startPositionMs = resumeMs)
+                    },
+                    onBack = { navState = previousState ?: NavigationState.Home }
+                )
+            }
 
-        is NavigationState.Player -> {
-            AntPlayerPlayer(
-                mediaItem = state.item,
-                startPositionMs = state.startPositionMs,
-                onBack = {
-                    // Prefer the state we explicitly stored for the Player
-                    navState = playerReturnState
-                        ?: previousState       // fallback if something weird happens
-                                ?: NavigationState.Home
-                },
-                onAutoPlayNext = { nextItem ->
-                    // Keep returning to the same Details as before
-                    navState = NavigationState.Player(
-                        nextItem,
-                        startPositionMs = 0L
-                    )
-                }
-            )
+            is NavigationState.Player -> {
+                AntPlayerPlayer(
+                    mediaItem = state.item,
+                    startPositionMs = state.startPositionMs,
+                    onBack = {
+                        navState = playerReturnState ?: previousState ?: NavigationState.Home
+                    },
+                    onAutoPlayNext = { nextItem ->
+                        navState = NavigationState.Player(nextItem, startPositionMs = 0L)
+                    }
+                )
+            }
         }
     }
 }
@@ -273,6 +285,7 @@ fun AntPlayerHome(
                         Column {
                             Text(
                                 text = "(v" + BuildConfig.VERSION_NAME + ")",
+                                //text = "(Development Beta)",
                                 style = MaterialTheme.typography.headlineSmall,
                                 color = MaterialTheme.colorScheme.onBackground
                             )
@@ -280,14 +293,10 @@ fun AntPlayerHome(
                     }
 
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        TvButton(
-                            text = "Settings",
-                            onClick = onSettings
-                        )
-                        TvButton(
-                            text = "Search",
-                            onClick = onSearch,
-                            modifier = Modifier.focusRequester(searchFocusRequester)
+                        Text(
+                            text = "Press the menu button to navigate",
+                            style = MaterialTheme.typography.headlineSmall,
+                            color = MaterialTheme.colorScheme.onBackground
                         )
                     }
                 }
@@ -747,6 +756,8 @@ fun AntPlayerDetails(
                 (item.id.startsWith("Animekai:") ||
                         item.id.contains("1movies", ignoreCase = true))
 
+    var showAddToWatchlist by remember { mutableStateOf(false) }
+
     MaterialTheme {
         if (!isRemoteSeries) {
             // ───── Local / simple item (demo JSON, continue watching episode, etc.) ─────
@@ -814,6 +825,18 @@ fun AntPlayerDetails(
                         )
 
                         Spacer(modifier = Modifier.height(20.dp))
+
+                        TvButton(
+                            text = "Add to Watchlist",
+                            onClick = { showAddToWatchlist = true }
+                        )
+
+                        if (showAddToWatchlist) {
+                            AddToWatchlistDialog(
+                                item = item,
+                                onDismiss = { showAddToWatchlist = false }
+                            )
+                        }
 
                         if (resumePositionMs != null && resumePositionMs!! > 10_000L) {
                             TvButton(
@@ -959,6 +982,20 @@ fun AntPlayerDetails(
                                 color = Color.LightGray
                             )
 
+                            Spacer(modifier = Modifier.height(16.dp))
+
+                            TvButton(
+                                text = "Add to Watchlist",
+                                onClick = { showAddToWatchlist = true }
+                            )
+
+                            if (showAddToWatchlist) {
+                                AddToWatchlistDialog(
+                                    item = item,
+                                    onDismiss = { showAddToWatchlist = false }
+                                )
+                            }
+
                             // 🔹 Resume latest episode (if applicable)
                             val latest = latestEpisodeProgress
                             if (latest != null) {
@@ -1040,6 +1077,9 @@ fun AntPlayerDetails(
                                 }
 
                                 else -> {
+
+                                    Spacer(modifier = Modifier.height(8.dp))
+
                                     Text(
                                         text = "Episodes",
                                         style = MaterialTheme.typography.titleMedium,
@@ -2128,5 +2168,229 @@ fun LicenseScreen(
                 )
             }
         }
+    }
+}
+
+@Composable
+fun AntPlayerWatchlistScreen(
+    watchlistId: Long,
+    watchlistName: String,
+    onItemSelected: (MediaItem) -> Unit,
+    onBack: () -> Unit
+) {
+    val context = LocalContext.current
+    val db = remember { AntPlayerDatabase.getInstance(context) }
+    val repo = remember { WatchlistRepository(db.watchlistDao()) }
+    val items by repo.observeItems(watchlistId).collectAsState(initial = emptyList())
+
+    val toast = LocalAntToast.current
+    val scope = rememberCoroutineScope()
+
+    // Auto-focus the back button
+    val backFocus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { backFocus.requestFocus() }
+
+    // Options popup state
+    var optionsFor by remember { mutableStateOf<MediaItem?>(null) }
+
+    BackHandler {
+        if (optionsFor != null) optionsFor = null else onBack()
+    }
+
+    MaterialTheme {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background)
+                .padding(24.dp)
+        ) {
+            TvButton(
+                text = "← Back",
+                onClick = onBack,
+                modifier = Modifier.focusRequester(backFocus)
+            )
+
+            Spacer(Modifier.height(16.dp))
+
+            Text(
+                text = watchlistName,
+                style = MaterialTheme.typography.headlineSmall,
+                color = MaterialTheme.colorScheme.onBackground
+            )
+
+            Spacer(Modifier.height(16.dp))
+
+            if (items.isEmpty()) {
+                Text(
+                    text = "This list is empty.",
+                    color = MaterialTheme.colorScheme.onBackground
+                )
+                return@Column
+            }
+
+            // ✅ GRID instead of list
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(5),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                items(items) { wlItem ->
+                    val media = MediaItem(
+                        id = wlItem.mediaId,
+                        title = wlItem.title,
+                        description = wlItem.description,
+                        image = wlItem.image,
+                        streamUrl = wlItem.streamUrl
+                    )
+
+                    WatchlistGridCard(
+                        item = media,
+                        onClick = { onItemSelected(media) },
+                        onHoldSelect = { optionsFor = media }
+                    )
+                }
+            }
+        }
+
+        // Options popup
+        optionsFor?.let { item ->
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { optionsFor = null },
+                title = { Text(item.title) },
+                text = { Text("Options") },
+                confirmButton = {
+                    androidx.compose.material3.TextButton(
+                        onClick = {
+                            scope.launch {
+                                repo.removeFromWatchlist(watchlistId, item.id)
+                                toast("Removed from $watchlistName")
+                                optionsFor = null
+                            }
+                        }
+                    ) { Text("Remove from \"$watchlistName\"") }
+                },
+                dismissButton = {
+                    androidx.compose.material3.TextButton(onClick = { optionsFor = null }) {
+                        Text("Cancel")
+                    }
+                }
+            )
+        }
+    }
+}
+
+@Composable
+fun AddToWatchlistDialog(
+    item: MediaItem,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val db = remember { AntPlayerDatabase.getInstance(context) }
+    val repo = remember { WatchlistRepository(db.watchlistDao()) }
+    val watchlists by repo.observeWatchlists().collectAsState(initial = emptyList())
+
+    val toast = LocalAntToast.current
+
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add to watchlist") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                watchlists.forEach { wl ->
+                    TvButton(
+                        text = wl.name,
+                        onClick = {
+                            scope.launch {
+                                repo.addToWatchlist(wl.id, item)
+                                toast("Added to ${wl.name}")
+                                onDismiss()
+                            }
+                        }
+                    )
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            androidx.compose.material3.TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+@Composable
+private fun WatchlistGridCard(
+    item: MediaItem,
+    onClick: () -> Unit,
+    onHoldSelect: () -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    var focused by remember { mutableStateOf(false) }
+
+    // Long-press tracking + swallow KeyUp
+    var longPressFired by remember { mutableStateOf(false) }
+    var swallowNextKeyUp by remember { mutableStateOf(false) }
+    var longPressJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+
+    val shape = RoundedCornerShape(16.dp)
+
+    Box(
+        modifier = Modifier
+            // ✅ Do NOT force any size here — let MediaCard measure itself
+            .wrapContentSize()
+            .onFocusChanged { focused = it.isFocused }
+            .focusable()
+            .onPreviewKeyEvent { e ->
+                val isSelect =
+                    (e.key == androidx.compose.ui.input.key.Key.DirectionCenter ||
+                            e.key == androidx.compose.ui.input.key.Key.Enter)
+
+                if (!isSelect) return@onPreviewKeyEvent false
+
+                when (e.type) {
+                    androidx.compose.ui.input.key.KeyEventType.KeyDown -> {
+                        if (e.nativeKeyEvent.repeatCount == 0) {
+                            longPressFired = false
+                            swallowNextKeyUp = false
+                            longPressJob?.cancel()
+                            longPressJob = scope.launch {
+                                kotlinx.coroutines.delay(550)
+                                longPressFired = true
+                                swallowNextKeyUp = true
+                                onHoldSelect()
+                            }
+                        }
+                        true
+                    }
+
+                    androidx.compose.ui.input.key.KeyEventType.KeyUp -> {
+                        longPressJob?.cancel()
+                        longPressJob = null
+
+                        if (longPressFired || swallowNextKeyUp) {
+                            longPressFired = false
+                            swallowNextKeyUp = false
+                            true
+                        } else {
+                            onClick()
+                            true
+                        }
+                    }
+
+                    else -> false
+                }
+            }
+            // ✅ Border wraps the actual card size now
+            .border(
+                width = if (focused) 3.dp else 0.dp,
+                color = if (focused) MaterialTheme.colorScheme.primary else Color.Transparent,
+                shape = shape
+            )
+            .padding(2.dp) // little breathing room so border doesn't overlap content
+    ) {
+        MediaCard(item = item, onClick = onClick)
     }
 }
