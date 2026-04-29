@@ -1,13 +1,16 @@
 package uk.anttheantster.antplayertv
 
-import android.net.Uri
-import androidx.core.view.WindowCompat
 import androidx.compose.runtime.collectAsState
 import uk.anttheantster.antplayertv.data.watchlist.WatchlistRepository
 import uk.anttheantster.antplayertv.ui.AntAppScaffold
+import android.graphics.drawable.Drawable
 import android.os.Bundle
 import android.view.ContextThemeWrapper
+import android.view.View
 import android.view.ViewGroup
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -15,28 +18,26 @@ import androidx.annotation.OptIn
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.fadeIn
-import androidx.compose.animation.slideInVertically
-import androidx.compose.foundation.Image
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextField
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,7 +53,6 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.Player
@@ -67,8 +67,6 @@ import uk.anttheantster.antplayertv.data.AnalyticsApi
 import uk.anttheantster.antplayertv.data.AntPlayerDatabase
 import uk.anttheantster.antplayertv.data.AshiEpisode
 import uk.anttheantster.antplayertv.data.AshiDetails
-import uk.anttheantster.antplayertv.data.AshiSearchResult
-import uk.anttheantster.antplayertv.data.ContentRepository
 import uk.anttheantster.antplayertv.data.EpisodeProgress
 import uk.anttheantster.antplayertv.data.ProgressRepository
 import uk.anttheantster.antplayertv.data.RemoteSearchApi
@@ -84,8 +82,41 @@ import androidx.core.net.toUri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import uk.anttheantster.antplayertv.ui.LocalAntToast
+import uk.anttheantster.antplayertv.ui.BootIntroScreen
+import uk.anttheantster.antplayertv.ui.BootStage
+import uk.anttheantster.antplayertv.ui.BrowseAllScreen
+import uk.anttheantster.antplayertv.ui.BrowseScreen
+import uk.anttheantster.antplayertv.ui.DetailsScreen
+import uk.anttheantster.antplayertv.ui.HomeScreen
+import uk.anttheantster.antplayertv.ui.LauncherHub
+import uk.anttheantster.antplayertv.ui.LiveTvPlaceholderScreen
 
 class MainActivity : ComponentActivity() {
+
+    /**
+     * v2.0 — capture the hardware Back key at the very top of the dispatch
+     * chain. On Fire TV (and some other Android variants) the first Back
+     * press while a focusable element is focused gets eaten by an internal
+     * "defocus" consumer, so the user has to press Back twice to actually
+     * navigate. Hijacking dispatchKeyEvent and calling
+     * `onBackPressedDispatcher.onBackPressed()` ourselves bypasses that
+     * consumer entirely — Compose `BackHandler`s still fire normally because
+     * they're registered with the same dispatcher.
+     */
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        if (event.action == android.view.KeyEvent.ACTION_DOWN &&
+            event.keyCode == android.view.KeyEvent.KEYCODE_BACK
+        ) {
+            // If any callback is registered & enabled, run it.
+            // Otherwise fall through so the activity can finish() naturally.
+            if (onBackPressedDispatcher.hasEnabledCallbacks()) {
+                onBackPressedDispatcher.onBackPressed()
+                return true
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         // Switch from Splash theme to normal theme
         setTheme(R.style.Theme_AntPlayerTV_Splash)
@@ -94,7 +125,25 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             AntPlayerTheme {
-                AntPlayerRoot()
+                // v2.0 — overscan-safe margin on TV. Many TVs apply a small
+                // amount of overscan (some can't be disabled in settings)
+                // which clips the outermost pixels of the app. We pad the
+                // root by a few dp ONLY when running on a leanback / TV
+                // device, so non-TV displays (e.g. a desktop monitor used
+                // for development) remain edge-to-edge.
+                val isTv = remember {
+                    packageManager.hasSystemFeature(
+                        android.content.pm.PackageManager.FEATURE_LEANBACK
+                    )
+                }
+                Box(
+                    modifier = if (isTv)
+                        Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                    else
+                        Modifier
+                ) {
+                    AntPlayerRoot()
+                }
             }
         }
     }
@@ -102,13 +151,12 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun AntPlayerTVApp() {
-    var navState by remember { mutableStateOf<NavigationState>(NavigationState.Home) }
+    // v2.0: app starts at the new launcher Hub.
+    var navState by remember { mutableStateOf<NavigationState>(NavigationState.Hub) }
     var previousState by remember { mutableStateOf<NavigationState?>(null) }
 
     // specifically for returning from Player screen
     var playerReturnState by remember { mutableStateOf<NavigationState?>(null) }
-
-    var searchUiState by remember { mutableStateOf(SearchUiState()) }
 
     val context = LocalContext.current
     val db = remember { AntPlayerDatabase.getInstance(context) }
@@ -125,42 +173,143 @@ fun AntPlayerTVApp() {
         navState = target
     }
 
+    /**
+     * Pick the right Details destination for a [MediaItem]:
+     *   • If the item carries a TMDB anchor (set when it was resolved
+     *     through the TMDB-driven flow) → route to the new [DetailsScreen].
+     *   • Otherwise fall back to the legacy [AntPlayerDetails].
+     */
+    fun openItemDetails(item: MediaItem, from: NavigationState) {
+        previousState = from
+        val tid = item.tmdbId
+        val ttype = item.tmdbType
+        navState = if (tid != null && ttype != null) {
+            NavigationState.TmdbDetails(
+                tmdbId = tid,
+                type = ttype,
+                titleHint = item.title,
+                posterHint = item.image,
+            )
+        } else {
+            NavigationState.Details(item)
+        }
+    }
+
     AntAppScaffold(
         current = navState,
         watchlists = watchlists,
-        onNavigate = { navigateTo(it) }
+        onNavigate = { navigateTo(it) },
+        // Drawer / Menu navigation is disabled while video is playing —
+        // it interrupts playback and historically caused focus to vanish
+        // out of the ExoPlayer controls.
+        drawerEnabled = navState !is NavigationState.Player
     ) { modifier, openDrawer ->
 
+        // Wrap the routed content in the scaffold-supplied Modifier so the
+        // focus-containment / focusRequester chain actually applies. Every
+        // screen previously ignored this modifier.
+        androidx.compose.foundation.layout.Box(modifier = modifier) {
         when (val state = navState) {
+            // v2.0 — 4-card launcher
+            is NavigationState.Hub -> {
+                LauncherHub(
+                    onBrowse = { navState = NavigationState.Browse },
+                    onLiveTv = { navState = NavigationState.LiveTV },
+                    onHome = { navState = NavigationState.Home },
+                    onSettings = { navState = NavigationState.Settings },
+                    onOpenDrawer = { openDrawer() }
+                )
+            }
+
             is NavigationState.Home -> {
-                AntPlayerHome(
-                    onItemSelected = { item ->
-                        previousState = NavigationState.Home
-                        navState = NavigationState.Details(item)
-                    },
-                    onSearch = { navState = NavigationState.Search },
-                    onSettings = {
-                        previousState = NavigationState.Home
-                        navState = NavigationState.Settings
+                // Belt-and-braces back handling: HomeScreen has its own
+                // BackHandler, this route-level one is registered first
+                // (so it sits *underneath* HomeScreen's in OnBackPressedDispatcher
+                // priority) and acts as a fallback in case a focus-traversal
+                // pass swallows the deeper one.
+                BackHandler { navState = NavigationState.Hub }
+                HomeScreen(
+                    onBack = { navState = NavigationState.Hub },
+                    onItemSelected = { item -> openItemDetails(item, NavigationState.Home) }
+                )
+            }
+
+            is NavigationState.Browse -> {
+                BackHandler { navState = NavigationState.Hub }
+                BrowseScreen(
+                    onBack = { navState = NavigationState.Hub },
+                    onViewAll = { navState = NavigationState.BrowseAll },
+                    onItemSelected = { card ->
+                        previousState = NavigationState.Browse
+                        navState = NavigationState.TmdbDetails(
+                            tmdbId = card.tmdbId,
+                            type = card.type,
+                            titleHint = card.title,
+                            posterHint = card.backdropUrl.ifBlank { card.posterUrl }
+                        )
                     }
                 )
             }
 
+            // Legacy Search route → forward to the new Browse screen.
             is NavigationState.Search -> {
-                AntPlayerSearch(
-                    searchUiState = searchUiState,
-                    onSearchStateChanged = { searchUiState = it },
-                    onItemSelected = { item ->
-                        previousState = NavigationState.Search
-                        navState = NavigationState.Details(item)
-                    },
-                    onBack = { navState = NavigationState.Home }
+                BackHandler { navState = NavigationState.Hub }
+                BrowseScreen(
+                    onBack = { navState = NavigationState.Hub },
+                    onViewAll = { navState = NavigationState.BrowseAll },
+                    onItemSelected = { card ->
+                        previousState = NavigationState.Browse
+                        navState = NavigationState.TmdbDetails(
+                            tmdbId = card.tmdbId,
+                            type = card.type,
+                            titleHint = card.title,
+                            posterHint = card.backdropUrl.ifBlank { card.posterUrl }
+                        )
+                    }
                 )
+            }
+
+            is NavigationState.BrowseAll -> {
+                BackHandler { navState = NavigationState.Browse }
+                BrowseAllScreen(
+                    onBack = { navState = NavigationState.Browse },
+                    onItemSelected = { card ->
+                        previousState = NavigationState.BrowseAll
+                        navState = NavigationState.TmdbDetails(
+                            tmdbId = card.tmdbId,
+                            type = card.type,
+                            titleHint = card.title,
+                            posterHint = card.backdropUrl.ifBlank { card.posterUrl }
+                        )
+                    }
+                )
+            }
+
+            is NavigationState.TmdbDetails -> {
+                DetailsScreen(
+                    tmdbId = state.tmdbId,
+                    type = state.type,
+                    titleHint = state.titleHint,
+                    posterHint = state.posterHint,
+                    onBack = { navState = previousState ?: NavigationState.Hub },
+                    onPlay = { playableItem ->
+                        playerReturnState = state
+                        navState = NavigationState.Player(
+                            item = playableItem,
+                            startPositionMs = null
+                        )
+                    }
+                )
+            }
+
+            is NavigationState.LiveTV -> {
+                BackHandler { navState = NavigationState.Hub }
+                LiveTvPlaceholderScreen()
             }
 
             is NavigationState.Settings -> {
                 AntPlayerSettings(
-                    onBack = { navState = NavigationState.Home }
+                    onBack = { navState = NavigationState.Hub }
                 )
             }
 
@@ -169,10 +318,9 @@ fun AntPlayerTVApp() {
                     watchlistId = state.id,
                     watchlistName = state.name,
                     onItemSelected = { item ->
-                        previousState = NavigationState.Watchlist(state.id, state.name)
-                        navState = NavigationState.Details(item)
+                        openItemDetails(item, NavigationState.Watchlist(state.id, state.name))
                     },
-                    onBack = { navState = NavigationState.Home }
+                    onBack = { navState = NavigationState.Hub }
                 )
             }
 
@@ -187,7 +335,7 @@ fun AntPlayerTVApp() {
                         playerReturnState = state
                         navState = NavigationState.Player(playableItem, startPositionMs = resumeMs)
                     },
-                    onBack = { navState = previousState ?: NavigationState.Home }
+                    onBack = { navState = previousState ?: NavigationState.Hub }
                 )
             }
 
@@ -196,7 +344,7 @@ fun AntPlayerTVApp() {
                     mediaItem = state.item,
                     startPositionMs = state.startPositionMs,
                     onBack = {
-                        navState = playerReturnState ?: previousState ?: NavigationState.Home
+                        navState = playerReturnState ?: previousState ?: NavigationState.Hub
                     },
                     onAutoPlayNext = { nextItem ->
                         navState = NavigationState.Player(nextItem, startPositionMs = 0L)
@@ -204,193 +352,8 @@ fun AntPlayerTVApp() {
                 )
             }
         }
+        } // close the wrapping Box
     }
-}
-
-@Composable
-fun AntPlayerHome(
-    onItemSelected: (MediaItem) -> Unit,
-    onSearch: () -> Unit,
-    onSettings: () -> Unit
-) {
-    val context = LocalContext.current
-
-    var allItems by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
-    var isLoading by remember { mutableStateOf(true) }
-
-    // 🔹 Load content off the main thread
-    LaunchedEffect(Unit) {
-        isLoading = true
-        allItems = withContext(Dispatchers.IO) {
-            ContentRepository(context).loadAllItems()
-        }
-        isLoading = false
-    }
-
-    // Continue Watching from DB
-    val continueWatchingItems by produceState(initialValue = emptyList<MediaItem>(), context) {
-        val db = AntPlayerDatabase.getInstance(context)
-        val progressRepo = ProgressRepository(db.progressDao())
-        value = progressRepo.getContinueWatching()
-    }
-
-    // History from DB
-    val historyItems by produceState(initialValue = emptyList<MediaItem>(), context) {
-        val db = AntPlayerDatabase.getInstance(context)
-        val progressRepo = ProgressRepository(db.progressDao())
-        value = progressRepo.getHistory()
-    }
-
-    MaterialTheme {
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(MaterialTheme.colorScheme.background)
-                .padding(top = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            // Top bar
-            item {
-                val searchFocusRequester = remember { FocusRequester() }
-
-                // Auto-focus Search when Home opens
-                LaunchedEffect(Unit) {
-                    searchFocusRequester.requestFocus()
-                }
-
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Image(
-                            painter = painterResource(id = R.drawable.antplayer_logo),
-                            contentDescription = "AntPlayer logo",
-                            modifier = Modifier
-                                .size(48.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                        )
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column {
-                            Text(
-                                text = "AntPlayer TV",
-                                style = MaterialTheme.typography.headlineSmall,
-                                color = MaterialTheme.colorScheme.onBackground
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column {
-                            Text(
-                                text = "(v" + BuildConfig.VERSION_NAME + ")",
-                                //text = "(Development Beta)",
-                                style = MaterialTheme.typography.headlineSmall,
-                                color = MaterialTheme.colorScheme.onBackground
-                            )
-                        }
-                    }
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Text(
-                            text = "Press the menu button to navigate",
-                            style = MaterialTheme.typography.headlineSmall,
-                            color = MaterialTheme.colorScheme.onBackground
-                        )
-                    }
-                }
-            }
-
-            // Continue Watching row
-            if (continueWatchingItems.isNotEmpty()) {
-                item {
-                    AnimatedVisibility(
-                        visible = true,
-                        enter = fadeIn() + slideInVertically(initialOffsetY = { it / 2 })
-                    ) {
-                        Column {
-                            HomeSectionTitle("Continue Watching")
-                            LazyRow(
-                                modifier = Modifier.padding(horizontal = 16.dp),
-                                horizontalArrangement = Arrangement.spacedBy(20.dp)
-                            ) {
-                                items(continueWatchingItems) { item ->
-                                    MediaCard(item = item, onClick = { onItemSelected(item) })
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // History row
-            if (historyItems.isNotEmpty()) {
-                item {
-                    AnimatedVisibility(
-                        visible = true,
-                        enter = fadeIn() + slideInVertically(initialOffsetY = { it / 3 })
-                    ) {
-                        Column {
-                            HomeSectionTitle("History")
-                            LazyRow(
-                                modifier = Modifier.padding(horizontal = 16.dp),
-                                horizontalArrangement = Arrangement.spacedBy(20.dp)
-                            ) {
-                                items(historyItems) { item ->
-                                    MediaCard(item = item, onClick = { onItemSelected(item) })
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Featured row (all items)
-            item {
-                if (allItems.isEmpty()) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 40.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            "Search for and watch a title for this screen to update",
-                            color = MaterialTheme.colorScheme.onBackground
-                        )
-                    }
-                } else {
-                    AnimatedVisibility(
-                        visible = true,
-                        enter = fadeIn() + slideInVertically(initialOffsetY = { it / 4 })
-                    ) {
-                        Column {
-                            HomeSectionTitle("Featured")
-                            LazyRow(
-                                modifier = Modifier.padding(horizontal = 16.dp),
-                                horizontalArrangement = Arrangement.spacedBy(20.dp)
-                            ) {
-                                items(allItems) { item ->
-                                    MediaCard(item = item, onClick = { onItemSelected(item) })
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun HomeSectionTitle(text: String) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.titleMedium,
-        color = MaterialTheme.colorScheme.onBackground,
-        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-    )
 }
 
 @Composable
@@ -453,6 +416,54 @@ fun MediaCard(item: MediaItem, onClick: () -> Unit) {
     }
 }
 
+/**
+ * Walks a Context's ContextWrapper chain to find the hosting
+ * [ComponentActivity]. Necessary because Compose's `LocalContext.current`
+ * may be wrapped (e.g. via a ContextThemeWrapper) before reaching the
+ * activity, which would defeat a naive `as? ComponentActivity` cast.
+ */
+private fun android.content.Context.findComponentActivity(): ComponentActivity? {
+    var c: android.content.Context? = this
+    while (c is android.content.ContextWrapper) {
+        if (c is ComponentActivity) return c
+        c = c.baseContext
+    }
+    return null
+}
+
+/**
+ * v2.0 — recursively walks the ExoPlayer controller's view hierarchy and
+ * stamps a state-list focus background onto every focusable leaf View, so
+ * the currently-focused control (play/pause, rewind, fast-forward, settings,
+ * subtitle picker, etc.) shows a visible highlight on TV.
+ *
+ * The DefaultTimeBar (`exo_progress`) is intentionally skipped: it draws
+ * its own scrubber thumb, and overwriting its background hides that.
+ */
+private fun applyPlayerFocusHighlights(playerView: PlayerView, ctx: android.content.Context) {
+    val focusBg: Drawable? = ContextCompat.getDrawable(ctx, R.drawable.player_button_focus)
+    // The DefaultTimeBar draws its own scrubber thumb; replacing its
+    // background would hide that, so we leave it alone.
+    val timeBarId = androidx.media3.ui.R.id.exo_progress
+
+    fun walk(view: View) {
+        if (view !is ViewGroup &&
+            view.isFocusable &&
+            view.id != timeBarId
+        ) {
+            // Each view needs its own Drawable instance so focus state is
+            // tracked independently across multiple buttons.
+            view.background = focusBg?.constantState?.newDrawable()?.mutate()
+        }
+        if (view is ViewGroup) {
+            for (i in 0 until view.childCount) {
+                walk(view.getChildAt(i))
+            }
+        }
+    }
+    walk(playerView)
+}
+
 data class EpisodeIdInfo(
     val seriesId: String,
     val episodeNumber: Int,
@@ -475,6 +486,59 @@ private fun parseEpisodeId(id: String): EpisodeIdInfo? {
         episodeNumber = number,
         watchLabel = label
     )
+}
+
+/**
+ * Resolve the *next* episode for [mediaItem] given its parsed [episodeInfo].
+ * Returns null when no next episode exists (last in the series, network
+ * error, or no playable stream option).
+ *
+ * Pulled out as a standalone suspend fn so it can be used both for
+ * eager pre-fetching (driving the queue-next-episode card) and for the
+ * fallback STATE_ENDED listener inside the player.
+ */
+private suspend fun resolveNextEpisode(
+    mediaItem: MediaItem,
+    episodeInfo: EpisodeIdInfo,
+    remoteApi: uk.anttheantster.antplayertv.data.RemoteSearchApi,
+): MediaItem? {
+    return try {
+        val episodes = remoteApi.getEpisodes(episodeInfo.seriesId)
+        // Season-aware lookup: for 1Movies episodes carry a season field;
+        // for Animekai the season is baked into the series URL so season is null.
+        val currentIndex = episodes.indexOfFirst { ep ->
+            ep.number == episodeInfo.episodeNumber &&
+                (ep.season == null || ep.season == mediaItem.tmdbSeason)
+        }
+        if (currentIndex == -1 || currentIndex + 1 >= episodes.size) return null
+
+        val nextEpisode = episodes[currentIndex + 1]
+        val options = remoteApi.getStreamOptions(nextEpisode.href)
+        val pick = options.firstOrNull { it.label == episodeInfo.watchLabel }
+            ?: options.firstOrNull()
+        if (pick == null || pick.url.isBlank()) return null
+
+        // nextEpisode.season may differ from current when crossing a season boundary.
+        val nextTmdbSeason = nextEpisode.season ?: mediaItem.tmdbSeason
+        val baseTitle = mediaItem.title.substringBefore(" - Ep ").ifBlank { mediaItem.title }
+        MediaItem(
+            id = "${episodeInfo.seriesId}#ep${nextEpisode.number}#${pick.label}",
+            title = "$baseTitle - Ep ${nextEpisode.number} (${pick.label})",
+            description = mediaItem.description,
+            image = mediaItem.image,
+            streamUrl = pick.url,
+            releaseYear = mediaItem.releaseYear,
+            totalEpisodes = mediaItem.totalEpisodes,
+            type = mediaItem.type,
+            ageRating = mediaItem.ageRating,
+            tmdbId = mediaItem.tmdbId,
+            tmdbType = mediaItem.tmdbType,
+            tmdbSeason = nextTmdbSeason,
+            tmdbEpisode = nextEpisode.number,
+        )
+    } catch (_: Exception) {
+        null
+    }
 }
 
 @OptIn(UnstableApi::class)
@@ -558,21 +622,18 @@ fun AntPlayerPlayer(
                             val info = episodeInfo ?: return@launch
 
                             try {
-                                // Fetch all episodes for this series
                                 val episodes = remoteApi.getEpisodes(info.seriesId)
-                                val currentIndex = episodes.indexOfFirst { it.number == info.episodeNumber }
+                                val currentIndex = episodes.indexOfFirst { ep ->
+                                    ep.number == info.episodeNumber &&
+                                        (ep.season == null || ep.season == mediaItem.tmdbSeason)
+                                }
 
                                 if (currentIndex == -1 || currentIndex + 1 >= episodes.size) {
-                                    // No next episode; do nothing
                                     return@launch
                                 }
 
                                 val nextEpisode = episodes[currentIndex + 1]
-
-                                // Fetch stream options for next episode
                                 val options = remoteApi.getStreamOptions(nextEpisode.href)
-
-                                // Prefer same watch label (sub/dub/etc), otherwise first
                                 val selectedOption = options.firstOrNull {
                                     it.label == info.watchLabel
                                 } ?: options.firstOrNull()
@@ -581,7 +642,7 @@ fun AntPlayerPlayer(
                                     return@launch
                                 }
 
-                                // Try to derive the base title (before " - Ep X (...)")
+                                val nextTmdbSeason = nextEpisode.season ?: mediaItem.tmdbSeason
                                 val baseTitle = mediaItem.title
                                     .substringBefore(" - Ep ")
                                     .ifBlank { mediaItem.title }
@@ -595,7 +656,11 @@ fun AntPlayerPlayer(
                                     releaseYear = mediaItem.releaseYear,
                                     totalEpisodes = mediaItem.totalEpisodes,
                                     type = mediaItem.type,
-                                    ageRating = mediaItem.ageRating
+                                    ageRating = mediaItem.ageRating,
+                                    tmdbId = mediaItem.tmdbId,
+                                    tmdbType = mediaItem.tmdbType,
+                                    tmdbSeason = nextTmdbSeason,
+                                    tmdbEpisode = nextEpisode.number,
                                 )
 
                                 // Jump to the next episode on the main thread
@@ -651,16 +716,104 @@ fun AntPlayerPlayer(
         onDispose { exoPlayer.release() }
     }
 
+    // v2.0 — pause playback when the activity is no longer in the foreground
+    // (e.g. user pressed the Home button on the Fire TV remote). Without this
+    // ExoPlayer keeps running in the background, eating CPU/network and
+    // continuing to play audio.
+    val activity = remember(context) { context.findComponentActivity() }
+    DisposableEffect(activity, exoPlayer) {
+        val owner = activity
+        if (owner != null) {
+            val observer = LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_STOP) {
+                    // Save progress so user can resume later, then pause.
+                    val pos = exoPlayer.currentPosition
+                    val dur = exoPlayer.duration.coerceAtLeast(0L)
+                    scope.launch {
+                        try { repository.saveProgress(mediaItem, pos, dur) } catch (_: Exception) {}
+                    }
+                    exoPlayer.pause()
+                }
+            }
+            owner.lifecycle.addObserver(observer)
+            onDispose { owner.lifecycle.removeObserver(observer) }
+        } else {
+            onDispose { }
+        }
+    }
+
     // PlayerView reference
     var playerViewRef by remember { mutableStateOf<PlayerView?>(null) }
+    // Track controller visibility ourselves — used so the very first OK
+    // press while controls are mid-fade-out lands focus on the play_pause
+    // button rather than nowhere.
+    var controllerVisible by remember { mutableStateOf(true) }
 
     // Focus will live on the AndroidView (PlayerView), not the Box
     val focusRequester = remember { FocusRequester() }
+
+    // ---- Queue-next-episode state ----
+    //
+    // We pre-fetch the next episode shortly after this one starts so when
+    // the user gets near the end we can offer it as a single-click jump
+    // (the existing STATE_ENDED listener still acts as a fallback).
+    var nextMediaItem by remember(mediaItem.id) { mutableStateOf<MediaItem?>(null) }
+    var positionMs   by remember(mediaItem.id) { mutableStateOf(0L) }
+    var durationMs   by remember(mediaItem.id) { mutableStateOf(0L) }
+    var nextCardDismissed by remember(mediaItem.id) { mutableStateOf(false) }
+
+    LaunchedEffect(mediaItem.id) {
+        val info = episodeInfo ?: return@LaunchedEffect
+        // small head-start so the user's current episode isn't competing
+        // with this network work mid-buffer.
+        kotlinx.coroutines.delay(2_000)
+        nextMediaItem = resolveNextEpisode(mediaItem, info, remoteApi)
+    }
+
+    // Position tick — drives the "near the end" check that shows the card.
+    LaunchedEffect(mediaItem.streamUrl) {
+        while (true) {
+            positionMs = exoPlayer.currentPosition
+            durationMs = exoPlayer.duration.coerceAtLeast(0L)
+            kotlinx.coroutines.delay(500)
+        }
+    }
+
+    val remainingMs = if (durationMs > 0) (durationMs - positionMs).coerceAtLeast(0L) else 0L
+    val showNextCard = nextMediaItem != null &&
+        durationMs > 0 &&
+        remainingMs in 1..30_000L &&
+        !hasTriggeredAutoplay &&
+        !nextCardDismissed
 
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black) // proper black bars
+            // Hardware Play/Pause is handled at the outer Box so it works
+            // regardless of which child currently has focus (queue-next
+            // card, controller buttons, the AndroidView itself, etc.).
+            .onPreviewKeyEvent { e ->
+                if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                when (e.key) {
+                    Key.MediaPlayPause -> {
+                        exoPlayer.playWhenReady = !exoPlayer.playWhenReady
+                        playerViewRef?.showController()
+                        true
+                    }
+                    Key.MediaPlay -> {
+                        exoPlayer.playWhenReady = true
+                        playerViewRef?.showController()
+                        true
+                    }
+                    Key.MediaPause -> {
+                        exoPlayer.playWhenReady = false
+                        playerViewRef?.showController()
+                        true
+                    }
+                    else -> false
+                }
+            }
     ) {
         AndroidView(
             modifier = Modifier
@@ -668,25 +821,35 @@ fun AntPlayerPlayer(
                 .focusRequester(focusRequester)
                 .focusable()
                 .onPreviewKeyEvent { event ->
-                    if (event.type == KeyEventType.KeyDown) {
-                        when (event.key) {
-                            Key.DirectionUp,
-                            Key.DirectionDown,
-                            Key.DirectionLeft,
-                            Key.DirectionRight,
-                            Key.DirectionCenter,
-                            Key.Enter,
-                            Key.NumPadEnter,
-                            Key.Spacebar -> {
-                                // Show controller whenever the user presses DPAD / OK
-                                playerViewRef?.showController()
-                                // return false so PlayerView still handles the key
-                                false
+                    if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                    when (event.key) {
+                        Key.DirectionUp,
+                        Key.DirectionDown,
+                        Key.DirectionLeft,
+                        Key.DirectionRight,
+                        Key.DirectionCenter,
+                        Key.Enter,
+                        Key.NumPadEnter,
+                        Key.Spacebar -> {
+                            // Show controller whenever the user presses DPAD / OK.
+                            val wasVisible = controllerVisible
+                            playerViewRef?.showController()
+                            if (!wasVisible) {
+                                // Controller was hidden / mid-fade-out — grab focus
+                                // on play_pause so the very first OK press lands on
+                                // a real button rather than dead air.
+                                playerViewRef?.findViewById<View>(
+                                    androidx.media3.ui.R.id.exo_play_pause
+                                )?.requestFocus()
                             }
-                            else -> false
+                            // return false so PlayerView still handles the key
+                            false
                         }
-                    } else {
-                        false
+
+                        // (Play/Pause is handled higher up on the outer Box so
+                        // it fires regardless of which child has focus.)
+
+                        else -> false
                     }
                 },
             factory = { ctx ->
@@ -710,6 +873,26 @@ fun AntPlayerPlayer(
                     )
                 }.also { createdView ->
                     playerViewRef = createdView
+
+                    // v2.0 — walk the controller's view tree once it has
+                    // laid out and apply our focus-state drawable to every
+                    // focusable leaf so the focused button is unmistakably
+                    // visible from across the room.
+                    createdView.post {
+                        applyPlayerFocusHighlights(createdView, ctx)
+                    }
+                    // Also re-apply each time the controller visibility
+                    // toggles (some buttons are inflated lazily) and keep
+                    // our `controllerVisible` flag in sync so the key
+                    // handler above knows when to re-focus play_pause.
+                    createdView.setControllerVisibilityListener(
+                        PlayerView.ControllerVisibilityListener { visibility ->
+                            controllerVisible = (visibility == View.VISIBLE)
+                            if (visibility == View.VISIBLE) {
+                                applyPlayerFocusHighlights(createdView, ctx)
+                            }
+                        }
+                    )
                 }
             },
             update = { view ->
@@ -722,10 +905,146 @@ fun AntPlayerPlayer(
             }
         )
 
+        // ---- Queue-next-episode overlay ----
+        //
+        // Visible only when (a) we successfully pre-fetched a next episode,
+        // (b) we're inside the last 30s of the current one, and (c) the
+        // user hasn't already auto-advanced or dismissed the card.
+        val nextItem = nextMediaItem
+        AnimatedVisibility(
+            visible = showNextCard && nextItem != null,
+            enter = fadeIn() + slideInHorizontally { it },
+            exit = fadeOut() + slideOutHorizontally { it },
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 32.dp, bottom = 96.dp)
+        ) {
+            if (nextItem != null) {
+                QueueNextEpisodeCard(
+                    item = nextItem,
+                    secondsRemaining = (remainingMs / 1000L).toInt(),
+                    onPlayNow = {
+                        hasTriggeredAutoplay = true
+                        // Persist progress for this item before jumping.
+                        val pos = exoPlayer.currentPosition
+                        val dur = exoPlayer.duration.coerceAtLeast(0L)
+                        scope.launch {
+                            try { repository.saveProgress(mediaItem, pos, dur) } catch (_: Exception) {}
+                        }
+                        onAutoPlayNext(nextItem)
+                    },
+                    onDismiss = { nextCardDismissed = true }
+                )
+            }
+        }
+
         // Grab focus when the player screen opens and show controller initially
         LaunchedEffect(Unit) {
             focusRequester.requestFocus()
             playerViewRef?.showController()
+        }
+    }
+}
+
+/**
+ * The bottom-right overlay shown in the last 30s of an episode offering a
+ * one-click jump to the next one. Focusable so DPAD-Right reaches it from
+ * the player controls; OK plays it; Back / dismiss button hides it for
+ * the rest of the current episode.
+ */
+@Composable
+private fun QueueNextEpisodeCard(
+    item: MediaItem,
+    secondsRemaining: Int,
+    onPlayNow: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(16.dp)
+
+    // v2.0 — aggressively grab focus the moment the card appears so the
+    // user can hit OK immediately without having to navigate to it. We
+    // delay one frame so the focusable() modifier below has actually
+    // attached before we ask for focus.
+    val focusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay(80)
+        try { focusRequester.requestFocus() } catch (_: Throwable) {}
+    }
+
+    androidx.compose.material3.Surface(
+        modifier = Modifier
+            .focusRequester(focusRequester)
+            .border(
+                width = if (focused) 3.dp else 1.dp,
+                color = if (focused)
+                    uk.anttheantster.antplayertv.ui.AntColors.AccentPurple
+                else
+                    uk.anttheantster.antplayertv.ui.AntColors.Divider,
+                shape = shape
+            )
+            .onFocusChanged { focused = it.isFocused }
+            .onPreviewKeyEvent { e ->
+                if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                when (e.key) {
+                    Key.Back -> { onDismiss(); true }
+                    else -> false
+                }
+            }
+            .clickable(onClick = onPlayNow)
+            .focusable(),
+        shape = shape,
+        color = uk.anttheantster.antplayertv.ui.AntColors.SurfaceElev2.copy(alpha = 0.94f),
+        tonalElevation = 8.dp,
+        shadowElevation = 12.dp,
+    ) {
+        Row(
+            modifier = Modifier
+                .padding(horizontal = 18.dp, vertical = 14.dp)
+                .width(360.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            // Tiny play icon badge
+            androidx.compose.material3.Surface(
+                shape = androidx.compose.foundation.shape.CircleShape,
+                color = uk.anttheantster.antplayertv.ui.AntColors.AccentPurple
+            ) {
+                Box(
+                    modifier = Modifier.size(40.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    androidx.compose.material3.Icon(
+                        imageVector = androidx.compose.material.icons.Icons.Filled.PlayArrow,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+            }
+
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Text(
+                    text = "Up next  •  ${secondsRemaining}s left",
+                    color = uk.anttheantster.antplayertv.ui.AntColors.AccentSoft,
+                    style = MaterialTheme.typography.labelLarge
+                )
+                Text(
+                    text = item.title,
+                    color = uk.anttheantster.antplayertv.ui.AntColors.TextPrimary,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                )
+                Text(
+                    text = "OK to play next  •  Back to dismiss",
+                    color = uk.anttheantster.antplayertv.ui.AntColors.TextMuted,
+                    style = MaterialTheme.typography.labelLarge
+                )
+            }
         }
     }
 }
@@ -1323,326 +1642,6 @@ fun TvButton(
     }
 }
 
-data class SearchMeta(
-    val releaseYear: String?,
-    val totalEpisodes: Int?,
-    val type: String?,
-    val ageRating: String?,   // currently unknown – we’ll keep this null for now
-    val synopsis: String?
-)
-
-data class SearchUiState(
-    val lastQuery: String = "",
-    val lastResults: List<AshiSearchResult> = emptyList()
-)
-
-@Composable
-fun AntPlayerSearch(
-    searchUiState: SearchUiState,
-    onSearchStateChanged: (SearchUiState) -> Unit,
-    onItemSelected: (MediaItem) -> Unit,
-    onBack: () -> Unit
-) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-
-    val api = remember {
-        RemoteSearchApi(
-            baseUrl = "https://api.anttheantster.uk"
-        )
-    }
-
-    var query by remember { mutableStateOf(searchUiState.lastQuery) }
-    var searchResults by remember {
-        mutableStateOf<List<AshiSearchResult>>(searchUiState.lastResults)
-    }
-    var isLoading by remember { mutableStateOf(false) }
-
-    // cache: key = href, value = metadata
-    val metaCache = remember { mutableStateMapOf<String, SearchMeta>() }
-
-    val firstResultFocusRequester = remember { FocusRequester() }
-
-    // 🔹 Track whether the text field currently has focus
-    var searchFieldFocused by remember { mutableStateOf(false) }
-
-    // Live search
-    LaunchedEffect(query) {
-        if (query.isBlank()) {
-            searchResults = emptyList()
-            onSearchStateChanged(
-                SearchUiState(
-                    lastQuery = "",
-                    lastResults = emptyList()
-                )
-            )
-        } else {
-            isLoading = true
-
-            val results = if (
-                query == searchUiState.lastQuery &&
-                searchUiState.lastResults.isNotEmpty()
-            ) {
-                // Reuse cached results for the same query
-                searchUiState.lastResults
-            } else {
-                // Fresh search
-                api.search(query)
-            }
-
-            searchResults = results
-            isLoading = false
-
-            onSearchStateChanged(
-                SearchUiState(
-                    lastQuery = query,
-                    lastResults = results
-                )
-            )
-        }
-    }
-
-    // 🔹 Only auto-focus results when the text field is NOT focused
-    LaunchedEffect(searchResults, searchFieldFocused) {
-        if (!searchFieldFocused && searchResults.isNotEmpty()) {
-            firstResultFocusRequester.requestFocus()
-        }
-    }
-
-    // Enrich top N results with details/episodes metadata
-    LaunchedEffect(searchResults) {
-        for (result in searchResults.take(8)) {
-            val key = result.href
-            if (metaCache.containsKey(key)) continue
-
-            try {
-                val details = api.getDetails(key)
-                val episodes = api.getEpisodes(key)
-
-                val releaseYear = details?.airdate
-                    ?.takeIf { it.isNotBlank() }
-                    ?.let { air ->
-                        Regex("(19\\d{2}|20\\d{2})").find(air)?.value
-                    }
-
-                val totalEpisodes = episodes.size
-                val type = if (totalEpisodes == 1) "Movie" else "TV"
-                val synopsis = details?.description?.takeIf { it.isNotBlank() }
-
-                metaCache[key] = SearchMeta(
-                    releaseYear = releaseYear,
-                    totalEpisodes = totalEpisodes,
-                    type = type,
-                    ageRating = null,
-                    synopsis = synopsis
-                )
-            } catch (_: Exception) {
-                // ignore this result if metadata fails
-            }
-        }
-    }
-
-    BackHandler { onBack() }
-
-    MaterialTheme {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(MaterialTheme.colorScheme.background)
-                .padding(16.dp)
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                TvButton(text = "← Back", onClick = onBack)
-
-                Spacer(modifier = Modifier.width(16.dp))
-
-                OutlinedTextField(
-                    value = query,
-                    onValueChange = { query = it },
-                    label = {
-                        Text(
-                            "Search",
-                            color = MaterialTheme.colorScheme.onBackground
-                        )
-                    },
-                    singleLine = true,
-                    modifier = Modifier
-                        .weight(1f)
-                        .onFocusChanged { state ->
-                            searchFieldFocused = state.isFocused
-                        }
-                )
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            when {
-                isLoading -> {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            "Searching.",
-                            color = MaterialTheme.colorScheme.onBackground
-                        )
-                    }
-                }
-
-                searchResults.isEmpty() && query.isNotBlank() -> {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            "No results",
-                            color = MaterialTheme.colorScheme.onBackground
-                        )
-                    }
-                }
-
-                searchResults.isEmpty() && query.isBlank() -> {
-                    // nothing typed yet
-                }
-
-                else -> {
-                    LazyColumn(
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                        modifier = Modifier.fillMaxSize()
-                    ) {
-                        itemsIndexed(searchResults) { index, result ->
-                            val key = result.href
-                            val meta = metaCache[key]
-
-                            val item = MediaItem(
-                                id = key,
-                                title = result.title,
-                                description = meta?.synopsis ?: "",
-                                image = result.image,
-                                streamUrl = "",
-                                releaseYear = meta?.releaseYear,
-                                totalEpisodes = meta?.totalEpisodes,
-                                type = meta?.type,
-                                ageRating = meta?.ageRating
-                            )
-
-                            val rowModifier =
-                                if (index == 0) Modifier.focusRequester(firstResultFocusRequester)
-                                else Modifier
-
-                            SearchResultRow(
-                                item = item,
-                                onClick = { onItemSelected(item) },
-                                modifier = rowModifier
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-
-@Composable
-fun SearchResultRow(
-    item: MediaItem,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    var isFocused by remember { mutableStateOf(false) }
-
-    val scale by animateFloatAsState(
-        targetValue = if (isFocused) 1.03f else 1.0f,
-        label = "searchRowScale"
-    )
-
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
-            .border(
-                width = if (isFocused) 2.dp else 0.dp,
-                color = if (isFocused) MaterialTheme.colorScheme.primary else Color.Transparent,
-                shape = RoundedCornerShape(8.dp)
-            )
-            .onFocusChanged { state ->
-                isFocused = state.isFocused
-            }
-            // clickable FIRST so OK/select works
-            .clickable(onClick = onClick)
-            .focusable()
-            .padding(8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        AsyncImage(
-            model = item.image,
-            contentDescription = item.title,
-            modifier = Modifier
-                .height(120.dp)
-                .width(80.dp)
-                .clip(RoundedCornerShape(8.dp))
-        )
-
-        Spacer(modifier = Modifier.width(12.dp))
-
-        Column {
-            Text(
-                text = item.title,
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-
-            // 🔹 metadata line: year • episodes/Movie • age rating
-            val metaParts = mutableListOf<String>()
-
-            item.releaseYear
-                ?.takeIf { it.isNotBlank() }
-                ?.let { metaParts.add(it) }
-
-            item.totalEpisodes?.let { count ->
-                val label = when {
-                    item.type?.contains("movie", ignoreCase = true) == true -> "Movie"
-                    count == 1 -> "Movie"
-                    else -> "$count episodes"
-                }
-                metaParts.add(label)
-            }
-
-            item.ageRating
-                ?.takeIf { it.isNotBlank() }
-                ?.let { metaParts.add("Age: $it") }
-
-            if (metaParts.isNotEmpty()) {
-                Text(
-                    text = metaParts.joinToString(" • "),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-            }
-
-            // 🔹 Synopsis (only if available)
-            if (!item.description.isNullOrBlank()) {
-                Text(
-                    text = item.description,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color.LightGray,
-                    maxLines = 3
-                )
-            }
-        }
-    }
-}
-
 @Composable
 fun EpisodeRow(
     episode: AshiEpisode,
@@ -1846,6 +1845,11 @@ fun AntPlayerRoot() {
     val licenseApi = remember { LicenseApi() }
     val updateApi = remember { UpdateApi() }
 
+    // v2.0 — boot animation gating. The intro animation runs first; only once
+    // it has finished do we move on to running the existing licence + update
+    // flow underneath the same logo backdrop.
+    var bootStage by remember { mutableStateOf(BootStage.LogoIntro) }
+
     var licenseKey by remember {
         mutableStateOf(LicenseUtils.getStoredLicenseKey(context) ?: "")
     }
@@ -1860,9 +1864,11 @@ fun AntPlayerRoot() {
     var updateState by remember { mutableStateOf(UpdateState.Checking) }
     var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
 
-    // Handle stored license check
-    LaunchedEffect(licenseState) {
-        if (licenseState == LicenseState.CheckingSaved) {
+    // Handle stored license check (only once intro animation has completed)
+    LaunchedEffect(bootStage, licenseState) {
+        if (bootStage != BootStage.LogoIntro &&
+            licenseState == LicenseState.CheckingSaved
+        ) {
             licenseError = null
             val result = licenseApi.checkLicense(
                 licenseKey = licenseKey,
@@ -1881,8 +1887,11 @@ fun AntPlayerRoot() {
     }
 
     // Once licensed, check for updates
-    LaunchedEffect(licenseState, updateState) {
-        if (licenseState == LicenseState.Licensed && updateState == UpdateState.Checking) {
+    LaunchedEffect(bootStage, licenseState, updateState) {
+        if (bootStage != BootStage.LogoIntro &&
+            licenseState == LicenseState.Licensed &&
+            updateState == UpdateState.Checking
+        ) {
             val info = updateApi.checkUpdate()
             val currentCode = BuildConfig.VERSION_CODE
             if (info != null && info.latestVersionCode > currentCode) {
@@ -1894,92 +1903,87 @@ fun AntPlayerRoot() {
         }
     }
 
-    when (licenseState) {
-        LicenseState.Initial,
-        LicenseState.CheckingSaved,
-        LicenseState.CheckingNew -> {
-            // Simple loading screen while dealing with license
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(MaterialTheme.colorScheme.background),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "Checking license...",
-                    color = MaterialTheme.colorScheme.onBackground,
-                    style = MaterialTheme.typography.bodyLarge
-                )
-            }
-        }
-
-        LicenseState.NeedsKey -> {
-            LicenseScreen(
-                currentKey = licenseKey,
-                errorMessage = licenseError,
-                onKeyChange = { licenseKey = it },
-                onActivate = {
-                    scope.launch {
-                        licenseState = LicenseState.CheckingNew
-                        licenseError = null
-
-                        val result = licenseApi.checkLicense(
-                            licenseKey = licenseKey,
-                            deviceId = deviceId,
-                            appVersion = BuildConfig.VERSION_NAME
-                        )
-
-                        if (result.valid) {
-                            LicenseUtils.saveLicenseKey(context, licenseKey)
-                            licenseState = LicenseState.Licensed
-                            updateState = UpdateState.Checking
-                        } else {
-                            licenseState = LicenseState.NeedsKey
-                            licenseError = result.message.ifBlank { "License invalid." }
-                        }
-                    }
-                }
-            )
-        }
-
-        LicenseState.Licensed -> {
-            when (updateState) {
-                UpdateState.Checking -> {
-                    // Show a small loading screen while checking updates
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(MaterialTheme.colorScheme.background),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "Checking for updates...",
-                            color = MaterialTheme.colorScheme.onBackground,
-                            style = MaterialTheme.typography.bodyLarge
-                        )
-                    }
-                }
-
-                UpdateState.NeedUpdate -> {
-                    UpdateScreen(
-                        info = updateInfo!!,
-                        onSkip = {
-                            // User chose "Later" → continue into the app
-                            updateState = UpdateState.UpToDate
-                        },
-                        onFinished = {
-                            // After starting download & install, we can let them proceed
-                            updateState = UpdateState.UpToDate
-                        }
-                    )
-                }
-
-                UpdateState.UpToDate -> {
-                    AntPlayerTVApp()
-                }
-            }
+    // Promote bootStage to Done once everything is settled and we don't need
+    // to show a prompt screen.
+    LaunchedEffect(licenseState, updateState) {
+        if (licenseState == LicenseState.Licensed &&
+            updateState == UpdateState.UpToDate
+        ) {
+            bootStage = BootStage.Done
         }
     }
+
+    // Single mount point for the boot screen so animations only play once
+    // and survive recompositions across the licence / update phases.
+    val showBootScreen = bootStage == BootStage.LogoIntro ||
+        licenseState == LicenseState.Initial ||
+        licenseState == LicenseState.CheckingSaved ||
+        licenseState == LicenseState.CheckingNew ||
+        (licenseState == LicenseState.Licensed && updateState == UpdateState.Checking)
+
+    val bootStatus = when {
+        bootStage == BootStage.LogoIntro -> null
+        licenseState == LicenseState.CheckingSaved ||
+            licenseState == LicenseState.CheckingNew ||
+            licenseState == LicenseState.Initial -> "Checking your licence…"
+        licenseState == LicenseState.Licensed && updateState == UpdateState.Checking -> "Looking for updates…"
+        else -> null
+    }
+
+    if (showBootScreen) {
+        BootIntroScreen(
+            stage = if (bootStage == BootStage.LogoIntro) BootStage.LogoIntro else BootStage.Working,
+            statusText = bootStatus,
+            onIntroFinished = {
+                if (bootStage == BootStage.LogoIntro) bootStage = BootStage.Working
+            }
+        )
+        return
+    }
+
+    // ---- Licence prompt ----
+    if (licenseState == LicenseState.NeedsKey) {
+        LicenseScreen(
+            currentKey = licenseKey,
+            errorMessage = licenseError,
+            onKeyChange = { licenseKey = it },
+            onActivate = {
+                scope.launch {
+                    licenseState = LicenseState.CheckingNew
+                    licenseError = null
+
+                    val result = licenseApi.checkLicense(
+                        licenseKey = licenseKey,
+                        deviceId = deviceId,
+                        appVersion = BuildConfig.VERSION_NAME
+                    )
+
+                    if (result.valid) {
+                        LicenseUtils.saveLicenseKey(context, licenseKey)
+                        licenseState = LicenseState.Licensed
+                        updateState = UpdateState.Checking
+                    } else {
+                        licenseState = LicenseState.NeedsKey
+                        licenseError = result.message.ifBlank { "License invalid." }
+                    }
+                }
+            }
+        )
+        return
+    }
+
+    // ---- Update prompt ----
+    if (updateState == UpdateState.NeedUpdate) {
+        UpdateScreen(
+            info = updateInfo!!,
+            onSkip = { updateState = UpdateState.UpToDate },
+            onFinished = { updateState = UpdateState.UpToDate }
+        )
+        return
+    }
+
+    // ---- Into the app (starts at the new Hub launcher) ----
+    AntPlayerTVApp()
 }
 
 private fun formatTimeMs(ms: Long): String {
@@ -2241,7 +2245,9 @@ fun AntPlayerWatchlistScreen(
                         title = wlItem.title,
                         description = wlItem.description,
                         image = wlItem.image,
-                        streamUrl = wlItem.streamUrl
+                        streamUrl = wlItem.streamUrl,
+                        tmdbId = wlItem.tmdbId,
+                        tmdbType = wlItem.tmdbType,
                     )
 
                     WatchlistGridCard(

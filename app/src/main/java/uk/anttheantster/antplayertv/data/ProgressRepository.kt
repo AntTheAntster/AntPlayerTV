@@ -38,6 +38,10 @@ class ProgressRepository(private val dao: ProgressDao) {
             description = "",
             image = entity.image,
             streamUrl = entity.streamUrl,
+            tmdbId = entity.tmdbId,
+            tmdbType = entity.tmdbType,
+            tmdbSeason = entity.tmdbSeason,
+            tmdbEpisode = entity.tmdbEpisode,
         )
 
     // Create a *title-level* MediaItem for a group of progress rows
@@ -61,7 +65,9 @@ class ProgressRepository(private val dao: ProgressDao) {
                 title = seriesTitle,    // base title only
                 description = "",
                 image = latest.image,
-                streamUrl = ""          // blank so Details treats this as a series
+                streamUrl = "",         // blank so Details treats this as a series
+                tmdbId = latest.tmdbId,
+                tmdbType = latest.tmdbType,
             )
         }
     }
@@ -145,9 +151,46 @@ class ProgressRepository(private val dao: ProgressDao) {
             streamUrl = item.streamUrl,
             lastPositionMs = positionMs,
             durationMs = durationMs,
-            lastUpdated = System.currentTimeMillis()
+            lastUpdated = System.currentTimeMillis(),
+            tmdbId = item.tmdbId,
+            tmdbType = item.tmdbType,
+            tmdbSeason = item.tmdbSeason,
+            tmdbEpisode = item.tmdbEpisode,
         )
         dao.upsert(entity)
+    }
+
+    /**
+     * Per-season progress lookup keyed by TMDB id + season. Returns a map
+     * from `tmdbEpisode` → [EpisodeProgress] so the Details rail can render
+     * a seek bar / "Completed" badge on the right episode card.
+     */
+    suspend fun getEpisodeProgressForTmdbSeason(
+        tmdbId: Int,
+        season: Int,
+    ): Map<Int, EpisodeProgress> {
+        val entities = dao.getAll()
+        val out = HashMap<Int, EpisodeProgress>()
+        for (e in entities) {
+            if (e.tmdbId != tmdbId) continue
+            if (e.tmdbSeason != season) continue
+            val ep = e.tmdbEpisode ?: continue
+            // Keep the latest record per episode if a user re-watched it.
+            val existing = out[ep]
+            if (existing == null || existing.lastUpdated < e.lastUpdated) {
+                out[ep] = EpisodeProgress(
+                    episodeNumber = ep,
+                    positionMs = e.lastPositionMs,
+                    durationMs = e.durationMs,
+                    mediaId = e.mediaId,
+                    title = e.title,
+                    image = e.image,
+                    streamUrl = e.streamUrl,
+                    lastUpdated = e.lastUpdated,
+                )
+            }
+        }
+        return out
     }
 
     suspend fun clearAll() {

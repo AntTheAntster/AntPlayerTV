@@ -35,7 +35,9 @@ class WatchlistRepository(
                 title = item.title,
                 description = item.description,
                 image = item.image,
-                streamUrl = item.streamUrl
+                streamUrl = item.streamUrl,
+                tmdbId = item.tmdbId,
+                tmdbType = item.tmdbType,
             )
         )
     }

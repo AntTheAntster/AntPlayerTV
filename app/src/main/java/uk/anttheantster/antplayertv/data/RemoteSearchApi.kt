@@ -2,8 +2,10 @@ package uk.anttheantster.antplayertv.data
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
@@ -109,8 +111,7 @@ class RemoteSearchApi(
                 val arr = JSONArray(body)
                 val result = mutableListOf<AshiEpisode>()
 
-                // ✅ Track which episode numbers we've already added
-                val seenNumbers = mutableSetOf<Int>()
+                val seenNumbers = mutableSetOf<String>()
 
                 for (i in 0 until arr.length()) {
                     val obj = arr.getJSONObject(i)
@@ -118,10 +119,14 @@ class RemoteSearchApi(
 
                     val number = obj.optInt("number", -1)
                     val href = obj.optString("href", "")
+                    val season = if (obj.has("season") && !obj.isNull("season"))
+                        obj.optInt("season").takeIf { it > 0 }
+                    else null
 
-                    if (number > 0 && href.isNotBlank() && seenNumbers.add(number)) {
-                        // Only the *first* occurrence for each episode number is added
-                        result.add(AshiEpisode(number, href))
+                    // Deduplicate on season:number so S1E1 and S4E1 are kept separately.
+                    val key = if (season != null) "$season:$number" else "$number"
+                    if (number > 0 && href.isNotBlank() && seenNumbers.add(key)) {
+                        result.add(AshiEpisode(number = number, href = href, season = season))
                     }
                 }
 
@@ -182,20 +187,36 @@ class RemoteSearchApi(
                     }
                 }
 
-                // Animekai-style: { "streams": ["Hardsub English","https://...", ...], "subtitles": "" }
+                // Animekai-style:
+                // Old: { "streams": ["Hardsub English","https://...", ...], "subtitles": "" }
+                // New: { "streams": [ { "title": "...", "streamUrl": "..." }, ... ], "subtitles": "" }
                 if (obj.has("streams")) {
                     val arr = obj.getJSONArray("streams")
-                    var i = 0
-                    while (i + 1 < arr.length()) {
-                        val label = arr.optString(i)
-                        val urlStream = arr.optString(i + 1)
-                        if (urlStream.startsWith("http")) {
-                            options.add(StreamOption(label = label, url = urlStream))
+
+                    // NEW format: array of objects
+                    val first = if (arr.length() > 0) arr.opt(0) else null
+                    if (first is JSONObject) {
+                        for (i in 0 until arr.length()) {
+                            val item = arr.optJSONObject(i) ?: continue
+                            val label = item.optString("title", "").ifBlank { item.optString("label", "") }
+                            val urlStream = item.optString("streamUrl", "").ifBlank { item.optString("url", "") }
+                            if (urlStream.startsWith("http")) {
+                                options.add(StreamOption(label = label.ifBlank { "Stream ${i + 1}" }, url = urlStream))
+                            }
                         }
-                        i += 2
+                    } else {
+                        // OLD format: alternating label/url strings
+                        var i = 0
+                        while (i + 1 < arr.length()) {
+                            val label = arr.optString(i)
+                            val urlStream = arr.optString(i + 1)
+                            if (urlStream.startsWith("http")) {
+                                options.add(StreamOption(label = label, url = urlStream))
+                            }
+                            i += 2
+                        }
                     }
                 }
-
                 return@withContext options
             }
         } catch (e: Exception) {
@@ -205,6 +226,43 @@ class RemoteSearchApi(
     }
 
 
+
+    // ---- Server-side match cache ----
+
+    suspend fun getMatchCache(key: String): CachedMatch? = withContext(Dispatchers.IO) {
+        val encoded = URLEncoder.encode(key, "UTF-8")
+        val request = Request.Builder().url("$baseUrl/api/match-cache?key=$encoded").build()
+        try {
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@withContext null
+                val obj = JSONObject(response.body?.string() ?: return@withContext null)
+                CachedMatch(
+                    href  = obj.optString("href",  ""),
+                    image = obj.optString("image", ""),
+                )
+            }
+        } catch (_: Exception) { null }
+    }
+
+    suspend fun putMatchCache(key: String, href: String, image: String) = withContext(Dispatchers.IO) {
+        val json = JSONObject().apply {
+            put("key",   key)
+            put("href",  href)
+            put("image", image)
+        }.toString()
+        val body = json.toRequestBody("application/json".toMediaType())
+        val request = Request.Builder().url("$baseUrl/api/match-cache").post(body).build()
+        try { client.newCall(request).execute().use {} } catch (_: Exception) {}
+    }
+
+    suspend fun evictMatchCache(key: String) = withContext(Dispatchers.IO) {
+        val encoded = URLEncoder.encode(key, "UTF-8")
+        val request = Request.Builder()
+            .url("$baseUrl/api/match-cache?key=$encoded")
+            .delete()
+            .build()
+        try { client.newCall(request).execute().use {} } catch (_: Exception) {}
+    }
 
     // Call /stream?url=...
     suspend fun resolveStream(href: String): String = withContext(Dispatchers.IO) {
@@ -235,11 +293,24 @@ class RemoteSearchApi(
 
                 if (obj.has("streams")) {
                     val arr = obj.getJSONArray("streams")
-                    // Find first element that looks like a URL
-                    for (i in 0 until arr.length()) {
-                        val value = arr.optString(i)
-                        if (value.startsWith("http")) {
-                            return@withContext value
+
+                    // NEW format: array of objects
+                    val first = if (arr.length() > 0) arr.opt(0) else null
+                    if (first is JSONObject) {
+                        for (i in 0 until arr.length()) {
+                            val item = arr.optJSONObject(i) ?: continue
+                            val urlStream = item.optString("streamUrl", "").ifBlank { item.optString("url", "") }
+                            if (urlStream.startsWith("http")) {
+                                return@withContext urlStream
+                            }
+                        }
+                    } else {
+                        // OLD format: alternating strings
+                        for (i in 0 until arr.length()) {
+                            val value = arr.optString(i)
+                            if (value.startsWith("http")) {
+                                return@withContext value
+                            }
                         }
                     }
                 }
@@ -253,6 +324,11 @@ class RemoteSearchApi(
     }
 }
 
+data class CachedMatch(
+    val href: String,
+    val image: String,
+)
+
 data class AshiDetails(
     val description: String,
     val aliases: String,
@@ -261,7 +337,10 @@ data class AshiDetails(
 
 data class AshiEpisode(
     val number: Int,
-    val href: String
+    val href: String,
+    /** Season number parsed from the episode list. Null for Animekai (each
+     *  season is its own series page so episode numbers are always relative). */
+    val season: Int? = null,
 )
 
 data class StreamOption(

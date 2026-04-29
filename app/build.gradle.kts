@@ -13,8 +13,8 @@ android {
         applicationId = "uk.anttheantster.antplayertv"
         minSdk = 23
         targetSdk = 36
-        versionCode = 120
-        versionName = "1.2.0"
+        versionCode = 210
+        versionName = "2.1.0"
 
     }
 
@@ -63,6 +63,9 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.material3.android)
+    // v2.0 — extended Material icons (LiveTv, Apps, Tune, TravelExplore, etc.)
+    // Version is provided by the Compose BOM declared above.
+    implementation("androidx.compose.material:material-icons-extended")
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.ui.test.junit4)
     debugImplementation(libs.androidx.ui.tooling)

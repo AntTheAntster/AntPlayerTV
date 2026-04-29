@@ -18,8 +18,10 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -30,9 +32,10 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
@@ -42,7 +45,6 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
@@ -63,14 +65,21 @@ import uk.anttheantster.antplayertv.data.watchlist.WatchlistRepository
  */
 val LocalAntToast = staticCompositionLocalOf<(String) -> Unit> { { _ -> } }
 
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun AntAppScaffold(
     current: NavigationState,
     watchlists: List<WatchlistEntity>,
     onNavigate: (NavigationState) -> Unit,
+    /**
+     * v2.0 — when false, Menu/Left no longer open the drawer, the drawer
+     * cannot be pulled out, and any in-flight drawer is force-closed.
+     * Used while the player is on screen so video playback isn't interrupted
+     * (and DPAD events stay with the controller).
+     */
+    drawerEnabled: Boolean = true,
     content: @Composable (Modifier, openDrawer: () -> Unit) -> Unit
 ) {
-    val focusManager = LocalFocusManager.current
     val drawerFocus = remember { FocusRequester() }
     val contentFocus = remember { FocusRequester() }
 
@@ -100,8 +109,14 @@ fun AntAppScaffold(
         }
     }
 
-    fun openDrawer() { drawerVisible = true }
+    fun openDrawer() { if (drawerEnabled) drawerVisible = true }
     fun closeDrawer() { drawerVisible = false }
+
+    // If the screen we're on disables the drawer (e.g. switched to the
+    // player while the drawer was open), make sure the drawer is closed.
+    LaunchedEffect(drawerEnabled) {
+        if (!drawerEnabled && drawerVisible) drawerVisible = false
+    }
 
     // Back closes drawer first
     BackHandler(enabled = drawerVisible) { closeDrawer() }
@@ -121,18 +136,41 @@ fun AntAppScaffold(
 
                     when (e.key) {
                         Key.Menu -> {
-                            if (!drawerVisible) openDrawer() else closeDrawer()
-                            true
+                            if (!drawerEnabled) {
+                                // Player route — let the host screen decide.
+                                false
+                            } else {
+                                if (!drawerVisible) openDrawer() else closeDrawer()
+                                true
+                            }
                         }
 
-                        // DPAD LEFT "off-screen opens menu"
+                        // DPAD LEFT — strictly focus traversal now.
+                        //
+                        // v2.0 update: the Menu button is the only way to
+                        // open the drawer. We still intercept Left to
+                        // handle our two specific cases:
+                        //   1. While the drawer is open, eat Left so focus
+                        //      can't escape into hidden underlying content.
+                        //   2. While playing video, pass Left straight
+                        //      through to ExoPlayer's controls.
+                        // Otherwise we let the framework's default focus
+                        // traversal run as-is (return false).
                         Key.DirectionLeft -> {
-                            if (!drawerVisible) {
-                                val moved = focusManager.moveFocus(FocusDirection.Left)
-                                if (!moved) {
-                                    openDrawer()
-                                    true
-                                } else false
+                            when {
+                                !drawerEnabled -> false       // pass through to player
+                                drawerVisible -> true         // trap focus inside drawer
+                                else -> false                  // normal focus traversal
+                            }
+                        }
+
+                        // DPAD RIGHT — when the drawer is open, treat it as
+                        // "close the drawer" rather than letting focus leak
+                        // into the underlying screen.
+                        Key.DirectionRight -> {
+                            if (drawerVisible) {
+                                closeDrawer()
+                                true
                             } else false
                         }
 
@@ -148,11 +186,21 @@ fun AntAppScaffold(
                     }
                 }
         ) {
-            // Content never moves
+            // Content never moves. While the drawer is visible we cancel
+            // any focus traversal that would try to ENTER the content
+            // subtree, so DPAD-Down from a drawer item can't grab a
+            // geometrically-nearby card behind the overlay.
             content(
                 Modifier
                     .fillMaxSize()
-                    .focusRequester(contentFocus),
+                    .focusRequester(contentFocus)
+                    .focusProperties {
+                        canFocus = !drawerVisible
+                        onEnter = {
+                            if (drawerVisible) FocusRequester.Cancel
+                            else FocusRequester.Default
+                        }
+                    },
                 ::openDrawer
             )
 
@@ -317,8 +365,10 @@ private fun DrawerContent(
         )
 
         val entries = buildList {
+            add(Entry("Hub", Icons.Filled.Apps, NavigationState.Hub))
             add(Entry("Home", Icons.Filled.Home, NavigationState.Home))
-            add(Entry("Search", Icons.Filled.Search, NavigationState.Search))
+            add(Entry("Browse", Icons.Filled.Search, NavigationState.Browse))
+            add(Entry("Live TV", Icons.Filled.LiveTv, NavigationState.LiveTV))
             add(Entry("Settings", Icons.Filled.Settings, NavigationState.Settings))
 
             watchlists.forEach { wl ->
@@ -340,8 +390,11 @@ private fun DrawerContent(
             val blockDown = index == entries.lastIndex
 
             val isSelected = when (val dest = entry.dest) {
+                is NavigationState.Hub -> current is NavigationState.Hub
                 is NavigationState.Home -> current is NavigationState.Home
-                is NavigationState.Search -> current is NavigationState.Search
+                is NavigationState.Browse -> current is NavigationState.Browse
+                is NavigationState.LiveTV -> current is NavigationState.LiveTV
+                is NavigationState.Search -> current is NavigationState.Search || current is NavigationState.Browse
                 is NavigationState.Settings -> current is NavigationState.Settings
                 is NavigationState.Watchlist -> current is NavigationState.Watchlist && current.id == dest.id
                 null -> false
