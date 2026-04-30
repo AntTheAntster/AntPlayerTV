@@ -1,0 +1,6 @@
+{
+  "versionCode": 200,
+  "versionName": "2.0.0",
+  "apkFilename": "AntPlayerTV-2.0.0.apk",
+  "changelog": "Version 2.0\n\nHuge overhaul across the board, new UI, new backend, new media player, new pages, new functions, new groundwork for future functions. Almost an entirely new app. And the best part is that it's ~1200 lines of code smaller than the original. Thus making AntPlayer faster and more lightweight."
+}

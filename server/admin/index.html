@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AntPlayer Admin</title>
+  <link rel="stylesheet" href="admin.css" />
+  <!-- Chart.js loaded BEFORE admin.js so the script can initialise charts -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <div id="app">
+
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark"></div>
+        <h1>AntPlayer&nbsp;<span class="brand-sub">Admin</span></h1>
+      </div>
+      <nav class="tabs" id="tabs">
+        <button class="tab active" data-tab="overview">Overview</button>
+        <button class="tab"        data-tab="licenses">Licenses</button>
+        <button class="tab"        data-tab="cache">Cache</button>
+        <button class="tab"        data-tab="analytics">Analytics</button>
+        <button class="tab"        data-tab="version">Version</button>
+      </nav>
+    </header>
+
+    <!-- ───── Overview ─────────────────────────────────────────────────── -->
+    <section id="tab-overview" class="tab-pane active">
+      <div class="stat-grid">
+        <div class="stat-card">
+          <div class="stat-label">Cached titles</div>
+          <div class="stat-value" id="statCached">—</div>
+          <div class="stat-meta" id="statCachedMeta"></div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Streamable</div>
+          <div class="stat-value" id="statStreamable">—</div>
+          <div class="stat-meta" id="statStreamableMeta"></div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Enriched</div>
+          <div class="stat-value" id="statEnriched">—</div>
+          <div class="stat-meta" id="statEnrichedMeta"></div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Active licenses</div>
+          <div class="stat-value" id="statLicenses">—</div>
+          <div class="stat-meta" id="statLicensesMeta"></div>
+        </div>
+      </div>
+
+      <div class="panel scanner-panel">
+        <div class="panel-head">
+          <h2>Content scanner</h2>
+          <div class="status-pill" id="scannerPill">…</div>
+        </div>
+        <p class="panel-hint">
+          The scanner walks TMDB's popular / trending / new / top-rated lists and
+          verifies each title against the scraper sources. Pausing stops new
+          verifications without disturbing in-flight requests — useful when the
+          server feels sluggish during peak playback.
+        </p>
+        <div class="scanner-stats">
+          <div><span class="dim">Verify scan</span>
+            <span id="scannerVerify">idle</span></div>
+          <div><span class="dim">Enrichment scan</span>
+            <span id="scannerEnrich">idle</span></div>
+          <div><span class="dim">Categories indexed</span>
+            <span id="scannerCats">—</span></div>
+        </div>
+        <div class="scanner-actions">
+          <button id="scannerPauseBtn"  class="btn primary">Pause</button>
+          <button id="scannerResumeBtn" class="btn">Resume</button>
+          <button id="scannerRefreshBtn" class="btn ghost">Refresh status</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───── Licenses ─────────────────────────────────────────────────── -->
+    <section id="tab-licenses" class="tab-pane">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Search</h2>
+        </div>
+        <div class="row">
+          <input id="licenseSearchInput" type="text"
+                 placeholder="Email or license key…" class="input flex" />
+          <button id="licenseSearchBtn" class="btn primary">Search</button>
+          <button id="licenseClearBtn"  class="btn ghost">Clear</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>Create license</h2></div>
+        <div class="row">
+          <input id="createEmail" type="email"
+                 placeholder="Email (optional)" class="input flex" />
+          <input id="createDays" type="number"
+                 placeholder="Days (blank = never)" class="input narrow" />
+          <button id="createBtn" class="btn primary">Create</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>Licenses</h2></div>
+        <div class="table-scroll">
+          <table id="licenseTable" class="data-table">
+            <thead>
+              <tr>
+                <th>ID</th><th>Key</th><th>Email</th><th>Status</th>
+                <th>Device</th><th>Created</th><th>Expires</th><th>Actions</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───── Cache ────────────────────────────────────────────────────── -->
+    <section id="tab-cache" class="tab-pane">
+      <div class="panel">
+        <div class="panel-head"><h2>Cached content browser</h2></div>
+        <div class="row">
+          <input id="cacheQuery" type="text"
+                 placeholder="Filter by title…" class="input flex" />
+          <select id="cacheType" class="input narrow">
+            <option value="">All types</option>
+            <option value="movie">Movies</option>
+            <option value="tv">TV</option>
+          </select>
+          <label class="checkbox">
+            <input id="cacheAll" type="checkbox" />
+            Include unstreamable
+          </label>
+          <button id="cacheRefreshBtn" class="btn primary">Refresh</button>
+        </div>
+        <div class="cache-meta" id="cacheMeta">—</div>
+        <div id="cacheGrid" class="cache-grid"></div>
+        <div class="pager">
+          <button id="cachePrevBtn" class="btn ghost" disabled>← Prev</button>
+          <div id="cachePageLabel" class="dim">Page 1</div>
+          <button id="cacheNextBtn" class="btn ghost" disabled>Next →</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───── Analytics ─────────────────────────────────────────────── -->
+    <section id="tab-analytics" class="tab-pane">
+      <div class="stat-grid">
+        <div class="stat-card">
+          <div class="stat-label">Total licenses</div>
+          <div class="stat-value" id="anaLicTotal">—</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Active</div>
+          <div class="stat-value" id="anaLicActive">—</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Revoked</div>
+          <div class="stat-value" id="anaLicRevoked">—</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Bound devices</div>
+          <div class="stat-value" id="anaLicBound">—</div>
+        </div>
+      </div>
+
+      <div class="chart-row">
+        <div class="panel chart-panel">
+          <h3>Licenses created — last 30 days</h3>
+          <div class="chart-host"><canvas id="licensesPerDayChart"></canvas></div>
+        </div>
+        <div class="panel chart-panel">
+          <h3>Plays — last 30 days</h3>
+          <div class="chart-host"><canvas id="playsPerDayChart"></canvas></div>
+        </div>
+      </div>
+
+      <div class="chart-row">
+        <div class="panel chart-panel">
+          <h3>Top 10 titles</h3>
+          <div class="chart-host"><canvas id="topTitlesChart"></canvas></div>
+        </div>
+        <div class="panel chart-panel">
+          <h3>Watch types</h3>
+          <div class="chart-host"><canvas id="watchTypesChart"></canvas></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───── Version ───────────────────────────────────────────────── -->
+    <section id="tab-version" class="tab-pane">
+      <div class="panel">
+        <div class="panel-head"><h2>Upload APK</h2></div>
+        <div class="row">
+          <input id="apkFileInput" type="file" accept=".apk" class="input flex" />
+          <button id="uploadApkBtn" class="btn primary">Upload</button>
+        </div>
+        <p class="panel-hint">After uploading, pick it in App Version below and Save.</p>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>App version</h2></div>
+        <div class="grid-2">
+          <input id="versionCode" type="number" class="input" placeholder="Version code (e.g. 200)" />
+          <input id="versionName" type="text"   class="input" placeholder="Version name (e.g. 2.0.1)" />
+        </div>
+        <select id="apkFilename" class="input full"></select>
+        <textarea id="changelog" rows="4" class="input full"
+                  placeholder="Changelog (markdown-ish, shown in the update prompt)"></textarea>
+        <div class="row right">
+          <button id="saveVersionBtn" class="btn primary">Save version</button>
+        </div>
+      </div>
+    </section>
+
+    <div id="toast" class="toast"></div>
+  </div>
+
+  <script src="admin.js"></script>
+</body>
+</html>
